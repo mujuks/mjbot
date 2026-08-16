@@ -1,0 +1,119 @@
+//@version=5
+// Gold Signal Bot - Pine Script replica
+// Supply/Demand + Liquidity Sweep + Momentum + Volume confluence
+// Mirrors the Python strategy in mjbot (GC=F, 1h)
+strategy("Gold Signal Bot (MJBot)", shorttitle="GoldSignals", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     commission_type=strategy.commission.percent, commission_value=0.05)
+
+// ---------- Inputs ----------
+maFast    = input.int(10,    "MA fast",   minval=1)
+maSlow    = input.int(30,    "MA slow",   minval=1)
+rsiPer    = input.int(14,    "RSI period", minval=1)
+rsiOb     = input.int(70,    "RSI overbought")
+rsiOs     = input.int(30,    "RSI oversold")
+macdF     = input.int(12,    "MACD fast")
+macdS     = input.int(26,    "MACD slow")
+macdSig   = input.int(9,     "MACD signal")
+atrPer    = input.int(14,    "ATR period")
+zoneMove  = input.float(1.5, "Zone move (ATR mult)")
+sweepPiv  = input.int(3,     "Sweep pivot window")
+sweepWin  = input.int(3,     "Sweep recent window")
+volMult   = input.float(1.5, "Volume spike mult")
+sigThresh = input.int(3,     "Signal threshold")
+strThresh = input.int(5,     "Strong threshold")
+slBuff    = input.float(1.0, "SL buffer (ATR)")
+riskRew   = input.float(2.0, "Risk reward")
+zonePiv   = input.int(3,     "Zone pivot window")
+zoneMoveAtr = input.float(1.5, "Zone move ATR")
+
+// ---------- Indicators ----------
+emaF  = ta.ema(close, maFast)
+emaS  = ta.ema(close, maSlow)
+rsiV  = ta.rsi(close, rsiPer)
+[macdLine, macdSigLine, _] = ta.macd(close, macdF, macdS, macdSig)
+atrV  = ta.atr(atrPer)
+volAvg = ta.sma(volume, 20)
+
+// Momentum: trend + strong candle
+moveUp   = close - close[1] > atrV * 1.0
+moveDown = close - close[1] < -atrV * 1.0
+momentum = (emaF > emaS ? 1 : -1) + (moveUp ? 1 : moveDown ? -1 : 0)
+
+// Liquidity sweep: price wicks through recent pivot then closes back
+pivotHi = ta.pivothigh(high, sweepPiv, sweepPiv)
+pivotLo = ta.pivotlow(low, sweepPiv, sweepPiv)
+sweepBear = false
+sweepBull = false
+sweepBearLevel = na
+sweepBullLevel = na
+for i = 1 to sweepWin
+    ph = ta.pivothigh(high, sweepPiv, sweepPiv)[i]
+    pl = ta.pivotlow(low, sweepPiv, sweepPiv)[i]
+    if not na(ph) and high > ph and close < ph
+        sweepBear := true
+        sweepBearLevel := ph
+    if not na(pl) and low < pl and close > pl
+        sweepBull := true
+        sweepBullLevel := pl
+
+// Supply/Demand zones (recent swing high/low + base)
+// Simplified: nearest pivots acting as zones
+swHi = ta.pivothigh(high, zonePiv, zonePiv)
+swLo = ta.pivotlow(low, zonePiv, zonePiv)
+zoneHi = ta.valuewhen(not na(swHi), swHi, 0)
+zoneLo = ta.valuewhen(not na(swLo), swLo, 0)
+
+nearDemand = not na(swLo) and (swLo - close) <= 1.5 * atrV and (swLo - close) >= -1.5 * atrV
+nearSupply = not na(swHi) and (close - swHi) <= 1.5 * atrV and (close - swHi) >= -1.5 * atrV
+
+// Volume confirmation
+volSpike = volume > volMult * volAvg
+
+// Score
+buyScore  = 0
+sellScore = 0
+buyScore  += nearDemand ? 2 : 0
+sellScore += nearSupply ? 2 : 0
+buyScore  += sweepBull ? 2 : 0
+sellScore += sweepBear ? 2 : 0
+buyScore  += momentum > 0 ? momentum : 0
+sellScore += momentum < 0 ? -momentum : 0
+buyScore  += volSpike and momentum > 0 ? 1 : 0
+sellScore += volSpike and momentum < 0 ? 1 : 0
+buyScore  += macdLine > macdSigLine and rsiV < rsiOb ? 1 : 0
+sellScore += macdLine < macdSigLine and rsiV > rsiOs ? 1 : 0
+
+signal = ""
+if buyScore >= sigThresh and buyScore > sellScore
+    signal := buyScore >= strThresh ? "STRONG_BUY" : "BUY"
+else if sellScore >= sigThresh and sellScore > buyScore
+    signal := sellScore >= strThresh ? "STRONG_SELL" : "SELL"
+
+// Entry / SL / TP
+var float entryPx = na
+var float slPx = na
+var float tpPx = na
+if signal == "BUY" or signal == "STRONG_BUY"
+    slBase = na(sweepBullLevel) ? (na(zoneLo) ? close : zoneLo) : math.min(sweepBullLevel, na(zoneLo) ? close : zoneLo)
+    slPx := slBase - slBuff * atrV
+    tpPx := close + riskRew * (close - slPx)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("LongExit", "Long", stop=slPx, limit=tpPx)
+else if signal == "SELL" or signal == "STRONG_SELL"
+    slBase = na(sweepBearLevel) ? (na(zoneHi) ? close : zoneHi) : math.max(sweepBearLevel, na(zoneHi) ? close : zoneHi)
+    slPx := slBase + slBuff * atrV
+    tpPx := close - riskRew * (slPx - close)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("ShortExit", "Short", stop=slPx, limit=tpPx)
+
+// ---------- Plots ----------
+plot(emaF, "MA fast", color.new(color.blue, 0))
+plot(emaS, "MA slow", color.new(color.orange, 0))
+plot(zoneHi, "Zone high", color.new(color.red, 30), linewidth=2)
+plot(zoneLo, "Zone low", color.new(color.green, 30), linewidth=2)
+
+bgcolor(signal == "BUY" ? color.new(color.green, 85) : signal == "STRONG_BUY" ? color.new(color.green, 60) : signal == "SELL" ? color.new(color.red, 85) : signal == "STRONG_SELL" ? color.new(color.red, 60) : na)
+
+if signal != ""
+    alert(message=signal + " " + syminfo.ticker + " entry=" + str.tostring(close) + " sl=" + str.tostring(slPx) + " tp=" + str.tostring(tpPx), freq=alert.freq_once_per_bar)

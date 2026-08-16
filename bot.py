@@ -1,7 +1,7 @@
 import sys
 import time
 
-from alerts import format_alert, load_config, send_telegram
+from alerts import format_alert, load_config, send_telegram, send_webhook
 from data_fetcher import fetch_forex_data
 from strategy import analyze
 
@@ -10,7 +10,7 @@ def main() -> None:
     cfg = load_config()
     print(f"Starting Forex signal bot. Pairs: {', '.join(cfg['pairs'])}")
     print(f"Timeframe: {cfg['timeframe']} | Check every {cfg['interval_seconds']}s")
-    print("Signals: BUY / SELL / STRONG_BUY / STRONG_SELL (score >= 2 or <= -2)\n")
+    print("Signals: BUY / SELL / STRONG_BUY / STRONG_SELL\n")
 
     last_signals: dict[str, str] = {}
 
@@ -26,6 +26,7 @@ def main() -> None:
                         message = format_alert(pair, result)
                         print(message)
                         send_telegram(cfg, message)
+                        send_webhook(cfg, pair, result)
                         last_signals[pair] = signal
                 else:
                     last_signals[pair] = "NONE"

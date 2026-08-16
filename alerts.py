@@ -21,6 +21,29 @@ def send_telegram(cfg: dict, message: str) -> bool:
         return False
 
 
+def send_webhook(cfg: dict, pair: str, result: dict) -> bool:
+    hook = cfg.get("webhook", {})
+    url = hook.get("url", "")
+    if not url:
+        return False
+    payload = {
+        "bot": "mjbot",
+        "symbol": pair,
+        "signal": result["signal"],
+        "price": result["price"],
+        "entry": result["entry"],
+        "stop_loss": result["stop_loss"],
+        "take_profit": result["take_profit"],
+        "score": result["score"],
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        return resp.status_code < 400
+    except requests.RequestException:
+        return False
+
+
 def format_alert(pair: str, result: dict) -> str:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
