@@ -306,54 +306,50 @@ def build_signal_series(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     demand_fresh = np.zeros(n, bool)
     supply_fresh = np.zeros(n, bool)
 
-    for i in range(1, n):
-        best_d = np.nan
-        best_d_bottom = np.nan
-        best_d_fresh = False
-        for z in demand_cands:
+    def nearest_zone(cands, i, kind):
+        active = []
+        for z in cands:
             idx = z["index"]
             if idx >= i:
                 break
             if i <= idx + right:
                 continue
             ahead_i = min(idx + 1 + right, i)
-            if close[ahead_i] - low[idx] <= move_atr * atr_s[idx]:
+            move = (close[ahead_i] - low[idx]) if kind == "demand" else (high[idx] - close[ahead_i])
+            if move <= move_atr * atr_s[idx]:
                 continue
-            dist = z["bottom"] - close[i]
+            touch_count = int(np.searchsorted(z["touch"], i, side="right"))
+            active.append((z["bottom"], z["top"], touch_count))
+        if not active:
+            return None
+        active.sort(key=lambda t: t[0])
+        merged = []
+        for bottom, top, tc in active:
+            if merged and bottom < merged[-1][1]:
+                merged[-1] = (min(merged[-1][0], bottom), max(merged[-1][1], top), min(merged[-1][2], tc))
+            else:
+                merged.append((bottom, top, tc))
+        price = close[i]
+        best = None
+        for bottom, top, tc in merged:
+            dist = (bottom - price) if kind == "demand" else (price - top)
             if abs(dist) > 1.5 * atr_s[i]:
                 continue
-            if np.isnan(best_d) or abs(dist) < abs(best_d):
-                best_d = dist
-                best_d_bottom = z["bottom"]
-                best_d_fresh = np.searchsorted(z["touch"], i, side="right") == 0
-        if not np.isnan(best_d):
-            near_demand[i] = best_d
-            zone_demand_bottom[i] = best_d_bottom
-            demand_fresh[i] = best_d_fresh
+            if best is None or abs(dist) < abs(best[0]):
+                best = (dist, bottom, top, tc)
+        return best
 
-        best_s = np.nan
-        best_s_top = np.nan
-        best_s_fresh = False
-        for z in supply_cands:
-            idx = z["index"]
-            if idx >= i:
-                break
-            if i <= idx + right:
-                continue
-            ahead_i = min(idx + 1 + right, i)
-            if high[idx] - close[ahead_i] <= move_atr * atr_s[idx]:
-                continue
-            dist = close[i] - z["top"]
-            if abs(dist) > 1.5 * atr_s[i]:
-                continue
-            if np.isnan(best_s) or abs(dist) < abs(best_s):
-                best_s = dist
-                best_s_top = z["top"]
-                best_s_fresh = np.searchsorted(z["touch"], i, side="right") == 0
-        if not np.isnan(best_s):
-            near_supply[i] = best_s
-            zone_supply_top[i] = best_s_top
-            supply_fresh[i] = best_s_fresh
+    for i in range(1, n):
+        best_d = nearest_zone(demand_cands, i, "demand")
+        if best_d is not None:
+            near_demand[i] = best_d[0]
+            zone_demand_bottom[i] = best_d[1]
+            demand_fresh[i] = best_d[3] == 0
+        best_s = nearest_zone(supply_cands, i, "supply")
+        if best_s is not None:
+            near_supply[i] = best_s[0]
+            zone_supply_top[i] = best_s[2]
+            supply_fresh[i] = best_s[3] == 0
 
     buy_score = np.zeros(n, int)
     sell_score = np.zeros(n, int)
