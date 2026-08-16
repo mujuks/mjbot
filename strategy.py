@@ -24,6 +24,96 @@ def macd(close: pd.Series, fast: int, slow: int, signal: int):
     return line, sig, line - sig
 
 
+def compute_bias(df: pd.DataFrame, cfg: dict) -> int:
+    """Higher-timeframe trend bias: 1 bullish, -1 bearish, 0 flat."""
+    if df is None or df.empty or len(df) < cfg.get("ma_slow", 30):
+        return 0
+    close = df["Close"]
+    fast = ema(close, cfg["ma_fast"])
+    slow = ema(close, cfg["ma_slow"])
+    if fast.iloc[-1] > slow.iloc[-1]:
+        return 1
+    if fast.iloc[-1] < slow.iloc[-1]:
+        return -1
+    return 0
+
+
+def bias_series(df: pd.DataFrame, cfg: dict) -> np.ndarray:
+    """Per-bar bias on the given timeframe (vectorized, causal)."""
+    if df is None or df.empty:
+        return np.zeros(0, int)
+    close = df["Close"]
+    f = ema(close, cfg["ma_fast"]).to_numpy(float)
+    s = ema(close, cfg["ma_slow"]).to_numpy(float)
+    b = np.zeros(len(close), int)
+    b[f > s] = 1
+    b[f < s] = -1
+    return b
+
+
+def _utc_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    if index.tz is not None:
+        return index.tz_convert("UTC")
+    return index.tz_localize("UTC")
+
+
+def _parse_hhmm(value: str):
+    h, m = value.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _minutes_of(ts) -> int:
+    return ts.hour * 60 + ts.minute
+
+
+def trading_allowed(now_utc, cfg: dict) -> bool:
+    """True if the given UTC datetime falls inside an active trading window."""
+    s = cfg.get("sessions", {})
+    if not s.get("enabled", True):
+        return True
+    if now_utc.weekday() not in s.get("days", [0, 1, 2, 3, 4]):
+        return False
+    start = _parse_hhmm(s.get("utc_start", "07:00"))
+    end = _parse_hhmm(s.get("utc_end", "21:00"))
+    t = _minutes_of(now_utc)
+    in_window = (t >= start or t < end) if end < start else start <= t < end
+    if not in_window:
+        return False
+    for window in cfg.get("blackout_windows", []):
+        start_dt = pd.Timestamp(window["start"]).tz_localize("UTC")
+        end_dt = pd.Timestamp(window["end"]).tz_localize("UTC")
+        if start_dt <= now_utc < end_dt:
+            return False
+    return True
+
+
+def trading_mask(index: pd.DatetimeIndex, cfg: dict) -> np.ndarray:
+    """Per-bar mask of bars inside an active trading window (for backtests)."""
+    n = len(index)
+    s = cfg.get("sessions", {})
+    if not s.get("enabled", True):
+        return np.ones(n, bool)
+    days = s.get("days", [0, 1, 2, 3, 4])
+    start = _parse_hhmm(s.get("utc_start", "07:00"))
+    end = _parse_hhmm(s.get("utc_end", "21:00"))
+    blackouts = [
+        (pd.Timestamp(w["start"]).tz_localize("UTC"), pd.Timestamp(w["end"]).tz_localize("UTC"))
+        for w in cfg.get("blackout_windows", [])
+    ]
+    idx_utc = _utc_index(index)
+    out = np.zeros(n, bool)
+    for i, ts in enumerate(idx_utc):
+        if ts.weekday() not in days:
+            continue
+        t = _minutes_of(ts)
+        if not ((t >= start or t < end) if end < start else start <= t < end):
+            continue
+        if any(bs <= ts < be for bs, be in blackouts):
+            continue
+        out[i] = True
+    return out
+
+
 def _momentum(close: pd.Series, atr_series: pd.Series, cfg: dict) -> int:
     fast = ema(close, cfg["ma_fast"])
     slow = ema(close, cfg["ma_slow"])
@@ -67,7 +157,7 @@ def _find_nearest_zone(zones: list, price: float, atr_val: float) -> dict | None
     return best
 
 
-def analyze(df: pd.DataFrame, cfg: dict) -> dict:
+def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0) -> dict:
     empty = {
         "signal": "NONE", "score": 0, "price": 0.0, "entry": 0.0,
         "stop_loss": 0.0, "take_profit": 0.0, "details": {},
@@ -138,11 +228,17 @@ def analyze(df: pd.DataFrame, cfg: dict) -> dict:
     sl_buffer = cfg.get("sl_atr_buffer", 1.0)
     rr = cfg.get("risk_reward", 2.0)
 
+    bias_filter = cfg.get("bias_enabled", True)
+    bias_label = {1: "bullish", -1: "bearish", 0: "flat"}.get(bias, "flat")
+    details["bias"] = bias_label
+
     signal = "NONE"
     entry = sl = tp = price
 
     if buy_score >= threshold and buy_score > sell_score:
-        if buy_score >= strong:
+        if bias_filter and bias < 0:
+            pass
+        elif buy_score >= strong:
             signal = "STRONG_BUY"
         else:
             signal = "BUY"
@@ -155,7 +251,9 @@ def analyze(df: pd.DataFrame, cfg: dict) -> dict:
             sl = price - 2 * sl_buffer * atr_val
         tp = entry + rr * (entry - sl)
     elif sell_score >= threshold and sell_score > buy_score:
-        if sell_score >= strong:
+        if bias_filter and bias > 0:
+            pass
+        elif sell_score >= strong:
             signal = "STRONG_SELL"
         else:
             signal = "SELL"
@@ -216,7 +314,7 @@ def _build_zones_arrays(high: np.ndarray, low: np.ndarray, close: np.ndarray, at
     return demand, supply
 
 
-def build_signal_series(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+def build_signal_series(df: pd.DataFrame, cfg: dict, bias: np.ndarray | None = None) -> pd.DataFrame:
     n = len(df)
     high = df["High"].to_numpy(float)
     low = df["Low"].to_numpy(float)
@@ -377,6 +475,11 @@ def build_signal_series(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
     signal_buy = (buy_score >= threshold) & (buy_score > sell_score)
     signal_sell = (sell_score >= threshold) & (sell_score > buy_score)
+
+    if cfg.get("bias_enabled", True) and bias is not None and len(bias) == n:
+        bias_arr = np.asarray(bias, dtype=int)
+        signal_buy = signal_buy & (bias_arr >= 0)
+        signal_sell = signal_sell & (bias_arr <= 0)
 
     signals = np.full(n, "NONE", dtype=object)
     signals[signal_buy & (buy_score >= strong)] = "STRONG_BUY"

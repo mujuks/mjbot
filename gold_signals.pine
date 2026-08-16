@@ -1,14 +1,15 @@
 //@version=5
 // Gold Signal Bot - Pine Script replica
+// 15m scalp entries + 1h bias filter + London/NY session filter
 // Supply/Demand + Liquidity Sweep + Momentum + Volume confluence
-// Mirrors the Python strategy in mjbot (GC=F, 1h)
+// Mirrors the Python strategy in mjbot (GC=F). Paste on a 15m chart.
 strategy("Gold Signal Bot (MJBot)", shorttitle="GoldSignals", overlay=true,
      initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
      commission_type=strategy.commission.percent, commission_value=0.05)
 
 // ---------- Inputs ----------
-maFast    = input.int(10,    "MA fast",   minval=1)
-maSlow    = input.int(30,    "MA slow",   minval=1)
+maFast    = input.int(10,    "MA fast",    minval=1)
+maSlow    = input.int(30,    "MA slow",    minval=1)
 rsiPer    = input.int(14,    "RSI period", minval=1)
 rsiOb     = input.int(70,    "RSI overbought")
 rsiOs     = input.int(30,    "RSI oversold")
@@ -17,15 +18,28 @@ macdS     = input.int(26,    "MACD slow")
 macdSig   = input.int(9,     "MACD signal")
 atrPer    = input.int(14,    "ATR period")
 zoneMove  = input.float(1.5, "Zone move (ATR mult)")
-sweepPiv  = input.int(3,     "Sweep pivot window")
-sweepWin  = input.int(3,     "Sweep recent window")
+sweepPiv  = input.int(2,     "Sweep pivot window")
+sweepWin  = input.int(2,     "Sweep recent window")
 volMult   = input.float(1.5, "Volume spike mult")
 sigThresh = input.int(3,     "Signal threshold")
 strThresh = input.int(5,     "Strong threshold")
 slBuff    = input.float(1.0, "SL buffer (ATR)")
 riskRew   = input.float(2.0, "Risk reward")
-zonePiv   = input.int(3,     "Zone pivot window")
-zoneMoveAtr = input.float(1.5, "Zone move ATR")
+zonePiv   = input.int(2,     "Zone pivot window")
+biasTf    = input.timeframe("60", "Bias timeframe")
+biasOn    = input.bool(true, "Apply 1h bias filter")
+sessOn    = input.bool(true, "Apply session filter (London/NY)")
+sessStart = input.int(7,  "Session start UTC hour", minval=0, maxval=23)
+sessEnd   = input.int(21, "Session end UTC hour",   minval=1, maxval=24)
+
+// ---------- Higher-timeframe bias ----------
+[hfFast, hfSlow] = request.security(syminfo.tickerid, biasTf, [ta.ema(close, maFast), ta.ema(close, maSlow)])
+bias = hfFast > hfSlow ? 1 : hfFast < hfSlow ? -1 : 0
+
+// ---------- Session filter (UTC, Mon-Fri) ----------
+dow   = dayofweek(time, "UTC")
+hourU = hour(time, "UTC")
+inSession = not sessOn or (dow >= dayofweek.monday and dow <= dayofweek.friday and hourU >= sessStart and hourU < sessEnd)
 
 // ---------- Indicators ----------
 emaF  = ta.ema(close, maFast)
@@ -41,8 +55,6 @@ moveDown = close - close[1] < -atrV * 1.0
 momentum = (emaF > emaS ? 1 : -1) + (moveUp ? 1 : moveDown ? -1 : 0)
 
 // Liquidity sweep: price wicks through recent pivot then closes back
-pivotHi = ta.pivothigh(high, sweepPiv, sweepPiv)
-pivotLo = ta.pivotlow(low, sweepPiv, sweepPiv)
 sweepBear = false
 sweepBull = false
 sweepBearLevel = na
@@ -58,7 +70,6 @@ for i = 1 to sweepWin
         sweepBullLevel := pl
 
 // Supply/Demand zones (recent swing high/low + base)
-// Simplified: nearest pivots acting as zones
 swHi = ta.pivothigh(high, zonePiv, zonePiv)
 swLo = ta.pivotlow(low, zonePiv, zonePiv)
 zoneHi = ta.valuewhen(not na(swHi), swHi, 0)
@@ -89,6 +100,17 @@ if buyScore >= sigThresh and buyScore > sellScore
     signal := buyScore >= strThresh ? "STRONG_BUY" : "BUY"
 else if sellScore >= sigThresh and sellScore > buyScore
     signal := sellScore >= strThresh ? "STRONG_SELL" : "SELL"
+
+// Bias filter: never trade against the higher-timeframe trend
+if biasOn
+    if bias < 0 and (signal == "BUY" or signal == "STRONG_BUY")
+        signal := ""
+    if bias > 0 and (signal == "SELL" or signal == "STRONG_SELL")
+        signal := ""
+
+// Session filter: no signals outside London/NY
+if not inSession
+    signal := ""
 
 // Entry / SL / TP
 var float entryPx = na

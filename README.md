@@ -1,18 +1,21 @@
 # MJBot - Gold Trading Signal Bot
 
-A Python bot that generates automated BUY/SELL signals for gold (GC=F) with entry, stop loss, and take profit levels. Combines supply/demand zones, liquidity sweeps, momentum, volume, and MACD/RSI into a single confluence engine, then delivers signals via Telegram and webhook.
+A Python bot that generates automated BUY/SELL signals for gold (GC=F) with entry, stop loss, and take profit levels. It scans **15-minute scalping entries** filtered by a **1-hour trend bias** and only trades during the **London/NY sessions** (the highest-activity windows for gold), then delivers signals via Telegram and webhook.
 
 ## Features
 
+- **Multi-timeframe confluence** - 15m entries with a 1h EMA trend bias filter (never trades against the higher-timeframe trend)
 - **Supply/Demand zones** - detects unfilled supply and demand areas with freshness scoring
 - **Liquidity sweeps** - catches stop hunts of recent pivot highs/lows
 - **Market mover** - trend + strong candle momentum detection
 - **Volume confirmation** - volume spike filter
 - **MACD + RSI** - momentum confluence and overbought/oversold filters
+- **Session filter** - only trades Monday-Friday during London/NY hours (default 07:00-21:00 UTC); avoids Asian session, rollover, and market closings
+- **News blackout windows** - optional configurable UTC windows (e.g. NFP/CPI/FOMC) where no signals fire
 - **Entry / SL / TP** - every signal includes a stop loss (1 ATR past the structure) and 2R take profit
-- **Telegram alerts** - instant notifications on new signals
+- **Telegram alerts** - instant notifications on new signals + an hourly report digest
 - **Webhook publisher** - POST signal JSON to any endpoint
-- **Backtester** - SL/TP-aware historical performance testing
+- **Backtester** - SL/TP-aware historical performance testing, bias- and session-accurate
 
 ## Requirements
 
@@ -38,37 +41,42 @@ A Python bot that generates automated BUY/SELL signals for gold (GC=F) with entr
    python bot.py
    ```
 
-The bot checks gold prices every `interval_seconds` (default 5 min) and alerts on new signals only (no repeat spam).
+The bot checks gold every `interval_seconds` (default 15 min = one fresh 15m candle), alerts on new signals only (no repeat spam), and sends a full **hourly report** to Telegram when `hourly_digest` is enabled.
 
 ## Backtest
 
 ```bash
-python backtest.py 365          # 365 days of 1h data, all configured pairs
-python backtest.py 90 GC=F      # custom lookback and symbol
+python backtest.py 60           # 60 days of 15m data (max for intraday), all configured pairs
+python backtest.py 30 GC=F      # custom lookback and symbol
 ```
 
-Example output:
+Example output (60 days, 15m entries + 1h bias + session filter):
 
 ```
-GC=F (1h, 365d):
-  Balance: 10000.0 -> 14897.47 (+48.97%)
-  Trades: 397 | Wins: 182 | Losses: 215 | Win rate: 45.8%
-  Avg win: +0.98% | Avg loss: -0.63% | PF: 1.31
-  SL hits: 177 | TP hits: 121 | Max drawdown: 9.53%
+GC=F (15m, 60d):
+  Balance: 10000.0 -> 10857.28 (+8.57%)
+  Trades: 104 | Wins: 42 | Losses: 62 | Win rate: 40.4%
+  Avg win: +0.80% | Avg loss: -0.40% | PF: 1.34
+  SL hits: 57 | TP hits: 40 | Max drawdown: 5.05%
 ```
+
+Note: yfinance caps intraday data at 60 days, so `lookback_days` above 60 is clamped to 60 for minute timeframes.
 
 ## TradingView
 
-`gold_signals.pine` is a Pine Script v5 replica of the strategy. Open a **GC=F** 1h chart in TradingView, open the Pine Editor, paste the script, and it will plot the same signals with native alerts (entry/SL/TP included in the alert message).
+`gold_signals.pine` is a Pine Script v5 replica of the strategy. Open a **GC=F 15m** chart in TradingView, open the Pine Editor, paste the script, and it will plot the same signals (including the 1h bias filter and session filter) with native alerts (entry/SL/TP included in the alert message).
 
 ## Configuration
 
 | Key | Default | Description |
 |---|---|---|
 | `pairs` | `["GC=F"]` | Symbols to watch (yfinance format) |
-| `timeframe` | `1h` | Candlestick interval |
-| `interval_seconds` | `300` | How often to check for signals |
-| `ma_fast` / `ma_slow` | `10` / `30` | Momentum trend EMAs |
+| `timeframe` | `15m` | Entry candlestick interval (scalping) |
+| `bias_timeframe` | `1h` | Higher-timeframe trend filter |
+| `bias_enabled` | `true` | Block signals against the bias trend |
+| `interval_seconds` | `900` | How often to check for signals |
+| `lookback_days` | `30` | Data window (minute TFs capped at 60 by yfinance) |
+| `ma_fast` / `ma_slow` | `10` / `30` | Momentum + bias trend EMAs |
 | `rsi_period` | `14` | RSI lookback |
 | `macd_*` | `12/26/9` | MACD parameters |
 | `atr_period` | `14` | ATR for SL/TP and zone sizing |
@@ -79,13 +87,16 @@ GC=F (1h, 365d):
 | `strong_threshold` | `5` | Score for STRONG_BUY/STRONG_SELL |
 | `risk_reward` | `2.0` | Take profit / risk ratio |
 | `sl_atr_buffer` | `1.0` | Stop loss distance in ATRs |
+| `sessions` | `07:00-21:00 UTC, Mon-Fri` | Active trading windows |
+| `blackout_windows` | `[]` | UTC news blackouts, e.g. `[{"start": "2026-09-04T12:00", "end": "2026-09-04T13:00"}]` |
+| `hourly_digest` | `true` | Send an hourly Telegram report |
 
 ## Project Structure
 
 ```
 alerts.py          Telegram + webhook alerting
 backtest.py        SL/TP-aware historical backtester
-bot.py             Main loop (signal generation + alerts)
+bot.py             Main loop (signal generation + hourly digest)
 config.example.json  Config template (copy to config.json)
 data_fetcher.py    yfinance data downloader
 liquidity.py       Liquidity sweep detector

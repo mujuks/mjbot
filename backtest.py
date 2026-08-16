@@ -1,16 +1,32 @@
 import sys
 
+import pandas as pd
+
 from alerts import load_config
 from data_fetcher import fetch_forex_data
-from strategy import build_signal_series
+from strategy import bias_series, build_signal_series, trading_mask
 
 
 def backtest(pair: str, cfg: dict, lookback_days: int = 365, initial_balance: float = 10000.0) -> dict:
-    df = fetch_forex_data(pair, cfg["timeframe"], lookback_days)
+    tf = cfg["timeframe"]
+    if tf.endswith("m"):
+        lookback_days = min(lookback_days, 60)
+    df = fetch_forex_data(pair, tf, lookback_days)
     if df is None or df.empty or len(df) < 60:
         return {"pair": pair, "error": "Not enough data"}
 
-    sig = build_signal_series(df, cfg)
+    bias = None
+    if cfg.get("bias_enabled", True) and cfg.get("bias_timeframe"):
+        bias_df = fetch_forex_data(pair, cfg["bias_timeframe"], lookback_days)
+        if bias_df is not None and not bias_df.empty:
+            b = pd.Series(bias_series(bias_df, cfg), index=bias_df.index)
+            b = b.shift(1)
+            bias = b.reindex(df.index, method="ffill").fillna(0).to_numpy(int)
+
+    sig = build_signal_series(df, cfg, bias=bias)
+    mask = trading_mask(df.index, cfg)
+    sig.loc[~mask, "signal"] = "NONE"
+
     closes = df["Close"].to_numpy(float)
 
     balance = initial_balance
