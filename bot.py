@@ -82,7 +82,7 @@ def main() -> None:
         if cfg.get("hourly_digest", False) and last_digest_hour != now_utc.hour:
             last_digest_hour = now_utc.hour
             for pair in cfg["pairs"]:
-                result = last_results.get(pair)
+                result = last_results.get(pair) if active else None
                 if result is None:
                     result = {"signal": "NONE", "bias": 0}
                 message = format_digest(pair, result, now_utc, cfg)

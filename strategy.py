@@ -236,35 +236,29 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0) -> dict:
     entry = sl = tp = price
 
     if buy_score >= threshold and buy_score > sell_score:
-        if bias_filter and bias < 0:
-            pass
-        elif buy_score >= strong:
-            signal = "STRONG_BUY"
-        else:
-            signal = "BUY"
-        entry = price
-        if sweep["bullish"]:
-            sl = min(sweep["level"], demand_zone["bottom"] if demand_zone else price) - sl_buffer * atr_val
-        elif demand_zone:
-            sl = demand_zone["bottom"] - sl_buffer * atr_val
-        else:
-            sl = price - 2 * sl_buffer * atr_val
-        tp = entry + rr * (entry - sl)
+        blocked = bias_filter and bias < 0
+        if not blocked:
+            signal = "STRONG_BUY" if buy_score >= strong else "BUY"
+            entry = price
+            if sweep["bullish"]:
+                sl = min(sweep["level"], demand_zone["bottom"] if demand_zone else price) - sl_buffer * atr_val
+            elif demand_zone:
+                sl = demand_zone["bottom"] - sl_buffer * atr_val
+            else:
+                sl = price - 2 * sl_buffer * atr_val
+            tp = entry + rr * (entry - sl)
     elif sell_score >= threshold and sell_score > buy_score:
-        if bias_filter and bias > 0:
-            pass
-        elif sell_score >= strong:
-            signal = "STRONG_SELL"
-        else:
-            signal = "SELL"
-        entry = price
-        if sweep["bearish"]:
-            sl = max(sweep["level"], supply_zone["top"] if supply_zone else price) + sl_buffer * atr_val
-        elif supply_zone:
-            sl = supply_zone["top"] + sl_buffer * atr_val
-        else:
-            sl = price + 2 * sl_buffer * atr_val
-        tp = entry - rr * (sl - entry)
+        blocked = bias_filter and bias > 0
+        if not blocked:
+            signal = "STRONG_SELL" if sell_score >= strong else "SELL"
+            entry = price
+            if sweep["bearish"]:
+                sl = max(sweep["level"], supply_zone["top"] if supply_zone else price) + sl_buffer * atr_val
+            elif supply_zone:
+                sl = supply_zone["top"] + sl_buffer * atr_val
+            else:
+                sl = price + 2 * sl_buffer * atr_val
+            tp = entry - rr * (sl - entry)
 
     return {
         "signal": signal,

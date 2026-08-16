@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 
@@ -35,7 +35,7 @@ def send_webhook(cfg: dict, pair: str, result: dict) -> bool:
         "stop_loss": result["stop_loss"],
         "take_profit": result["take_profit"],
         "score": result["score"],
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     try:
         resp = requests.post(url, json=payload, timeout=10)
