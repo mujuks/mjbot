@@ -1,13 +1,18 @@
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
-from alerts import format_alert, load_config, send_telegram, send_webhook
+import pandas as pd
+
+from alerts import format_alert, load_config, send_telegram, send_telegram_photo, send_webhook
+from chart import generate_signal_chart
 from data_fetcher import fetch_forex_data
 from strategy import analyze, compute_bias, trading_allowed
+from webhook_server import run_server
 
 
-def analyze_pair(pair: str, cfg: dict) -> dict:
+def analyze_pair(pair: str, cfg: dict) -> tuple[dict, pd.DataFrame]:
     df = fetch_forex_data(pair, cfg["timeframe"], cfg.get("lookback_days", 30))
     bias = 0
     if cfg.get("bias_enabled", True) and cfg.get("bias_timeframe"):
@@ -15,7 +20,7 @@ def analyze_pair(pair: str, cfg: dict) -> dict:
         bias = compute_bias(bias_df, cfg)
     result = analyze(df, cfg, bias=bias)
     result["bias"] = bias
-    return result
+    return result, df
 
 
 def format_digest(pair: str, result: dict, now_utc: datetime, cfg: dict) -> str:
@@ -41,6 +46,18 @@ def format_digest(pair: str, result: dict, now_utc: datetime, cfg: dict) -> str:
 
 def main() -> None:
     cfg = load_config()
+
+    webhook_cfg = cfg.get("webhook_server", {})
+    if webhook_cfg.get("enabled", True):
+        wh_host = webhook_cfg.get("host", "127.0.0.1")
+        wh_port = webhook_cfg.get("port", 8080)
+        wh_thread = threading.Thread(
+            target=run_server, args=(wh_host, wh_port), daemon=True
+        )
+        wh_thread.start()
+        print(f"Webhook server started on {wh_host}:{wh_port}")
+        print(f"  TradingView alert URL: http://YOUR_NGROK_URL/webhook")
+
     print(f"Starting Forex signal bot. Pairs: {', '.join(cfg['pairs'])}")
     print(f"Entry timeframe: {cfg['timeframe']} | Bias timeframe: {cfg.get('bias_timeframe', 'none')}")
     print(f"Check every {cfg['interval_seconds']}s | Hourly digest: {cfg.get('hourly_digest', False)}")
@@ -48,6 +65,7 @@ def main() -> None:
 
     last_signals: dict[str, str] = {}
     last_results: dict[str, dict] = {}
+    last_dfs: dict[str, pd.DataFrame] = {}
     last_digest_hour: int | None = None
 
     while True:
@@ -62,8 +80,9 @@ def main() -> None:
                         last_signals[pair] = "NONE"
                     continue
 
-                result = analyze_pair(pair, cfg)
+                result, df = analyze_pair(pair, cfg)
                 last_results[pair] = result
+                last_dfs[pair] = df
                 signal = result["signal"]
 
                 if signal in ("STRONG_BUY", "BUY", "STRONG_SELL", "SELL"):
@@ -72,6 +91,9 @@ def main() -> None:
                         print(message)
                         send_telegram(cfg, message)
                         send_webhook(cfg, pair, result)
+                        chart = generate_signal_chart(df, cfg, result, pair)
+                        if chart:
+                            send_telegram_photo(cfg, chart, message)
                         last_signals[pair] = signal
                 else:
                     last_signals[pair] = "NONE"
@@ -88,6 +110,11 @@ def main() -> None:
                 message = format_digest(pair, result, now_utc, cfg)
                 print(message)
                 send_telegram(cfg, message)
+                df = last_dfs.get(pair)
+                if df is not None and result.get("signal", "NONE") != "NONE":
+                    chart = generate_signal_chart(df, cfg, result, pair)
+                    if chart:
+                        send_telegram_photo(cfg, chart, message)
 
         time.sleep(cfg["interval_seconds"])
 

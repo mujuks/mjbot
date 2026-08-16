@@ -137,5 +137,8 @@ plot(zoneLo, "Zone low", color.new(color.green, 30), linewidth=2)
 
 bgcolor(signal == "BUY" ? color.new(color.green, 85) : signal == "STRONG_BUY" ? color.new(color.green, 60) : signal == "SELL" ? color.new(color.red, 85) : signal == "STRONG_SELL" ? color.new(color.red, 60) : na)
 
+bias_label = bias > 0 ? "bullish" : bias < 0 ? "bearish" : "flat"
+
 if signal != ""
-    alert(message=signal + " " + syminfo.ticker + " entry=" + str.tostring(close) + " sl=" + str.tostring(slPx) + " tp=" + str.tostring(tpPx), freq=alert.freq_once_per_bar)
+    json_msg = '{"signal":"' + signal + '","symbol":"' + syminfo.ticker + '","entry":' + str.tostring(close) + ',"sl":' + str.tostring(slPx) + ',"tp":' + str.tostring(tpPx) + ',"score":' + str.tostring(buyScore + sellScore) + ',"bias":"' + bias_label + '","timeframe":"' + timeframe.period + '"}'
+    alert(message=json_msg, freq=alert.freq_once_per_bar)

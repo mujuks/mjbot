@@ -21,6 +21,23 @@ def send_telegram(cfg: dict, message: str) -> bool:
         return False
 
 
+def send_telegram_photo(cfg: dict, image_bytes: bytes, caption: str = "") -> bool:
+    tg = cfg.get("telegram", {})
+    if not tg.get("enabled") or not tg.get("bot_token") or not tg.get("chat_id"):
+        return False
+    url = f"https://api.telegram.org/bot{tg['bot_token']}/sendPhoto"
+    try:
+        resp = requests.post(
+            url,
+            data={"chat_id": tg["chat_id"], "caption": caption},
+            files={"photo": ("chart.png", image_bytes, "image/png")},
+            timeout=30,
+        )
+        return resp.status_code == 200
+    except requests.RequestException:
+        return False
+
+
 def send_webhook(cfg: dict, pair: str, result: dict) -> bool:
     hook = cfg.get("webhook", {})
     url = hook.get("url", "")
