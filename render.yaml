@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: mjbot
     runtime: python
     plan: free

@@ -1,3 +1,4 @@
+import os
 import sys
 import threading
 import time
@@ -10,7 +11,6 @@ from chart import generate_signal_chart
 from data_fetcher import fetch_forex_data
 from live_price import fetch_gold_spot_price, validate_data_freshness, calibrate_to_spot
 from strategy import analyze, compute_bias, trading_allowed
-from webhook_server import run_server
 
 
 def analyze_pair(pair: str, cfg: dict) -> tuple[dict, pd.DataFrame]:
@@ -54,20 +54,7 @@ def format_digest(pair: str, result: dict, now_utc: datetime, cfg: dict) -> str:
     return "\n".join(lines)
 
 
-def main() -> None:
-    cfg = load_config()
-
-    webhook_cfg = cfg.get("webhook_server", {})
-    if webhook_cfg.get("enabled", True):
-        wh_host = webhook_cfg.get("host", "127.0.0.1")
-        wh_port = webhook_cfg.get("port", 8080)
-        wh_thread = threading.Thread(
-            target=run_server, args=(wh_host, wh_port), daemon=True
-        )
-        wh_thread.start()
-        print(f"Webhook server started on {wh_host}:{wh_port}")
-        print(f"  TradingView alert URL: http://YOUR_NGROK_URL/webhook")
-
+def _polling_loop(cfg):
     print(f"Starting Forex signal bot. Pairs: {', '.join(cfg['pairs'])}")
     print(f"Entry timeframe: {cfg['timeframe']} | Bias timeframe: {cfg.get('bias_timeframe', 'none')}")
     print(f"Check every {cfg['interval_seconds']}s | Hourly digest: {cfg.get('hourly_digest', False)}")
@@ -127,6 +114,26 @@ def main() -> None:
                         send_telegram_photo(cfg, chart, message)
 
         time.sleep(cfg["interval_seconds"])
+
+
+def main() -> None:
+    cfg = load_config()
+
+    port = int(os.environ.get("PORT", cfg.get("webhook_server", {}).get("port", 8080)))
+    host = cfg.get("webhook_server", {}).get("host", "0.0.0.0")
+    use_webhook_server = cfg.get("webhook_server", {}).get("enabled", True)
+
+    if use_webhook_server:
+        poll_thread = threading.Thread(target=_polling_loop, args=(cfg,), daemon=True)
+        poll_thread.start()
+        print(f"Polling loop started in background")
+        print(f"Webhook server starting on {host}:{port}")
+        print(f"  TradingView alert URL: http://YOUR_WEBHOOK_URL/webhook")
+        print(f"  Health check: http://YOUR_WEBHOOK_URL/health")
+        from webhook_server import run_server
+        run_server(host, port)
+    else:
+        _polling_loop(cfg)
 
 
 if __name__ == "__main__":

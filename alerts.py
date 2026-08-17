@@ -29,6 +29,8 @@ def load_config(path: str = "config.json") -> dict:
         cfg.setdefault("webhook_server", {})["host"] = os.getenv("WEBHOOK_HOST")
     if os.getenv("WEBHOOK_PORT"):
         cfg.setdefault("webhook_server", {})["port"] = int(os.getenv("WEBHOOK_PORT"))
+    if os.getenv("PORT"):
+        cfg.setdefault("webhook_server", {})["port"] = int(os.getenv("PORT"))
     return cfg
 
 
