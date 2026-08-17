@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from liquidity import detect_liquidity_sweep
+from order_blocks import detect_order_blocks, find_nearest_ob
 from zones import detect_zones, _atr
 def ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
@@ -179,6 +180,7 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
     momentum = _momentum(close, _atr(df, cfg.get("atr_period", 14)), cfg)
     zones = detect_zones(df, cfg)
     sweep = detect_liquidity_sweep(df, cfg)
+    obs = detect_order_blocks(df, cfg)
     vol_score = _volume_signal(df["Volume"], cfg)
 
     rsi_val = rsi(close, cfg["rsi_period"]).iloc[-1]
@@ -242,6 +244,29 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
         sell_score += sweep_pts
         sell_factors += 1
         details["sweep"] = f"bearish sweep of high {sweep_level:.2f} ({bars} bars ago)"
+
+    bullish_ob = find_nearest_ob(obs["bullish"], price, atr_val, cfg)
+    bearish_ob = find_nearest_ob(obs["bearish"], price, atr_val, cfg)
+
+    if bullish_ob:
+        ob_touches = bullish_ob["touches"]
+        max_ob_touches = cfg.get("ob_max_touches", 5)
+        if ob_touches <= max_ob_touches:
+            ob_pts = max(1, round(bullish_ob["strength"] * 2))
+            buy_score += ob_pts
+            buy_factors += 1
+            freshness = "fresh" if ob_touches == 0 else f"touched {ob_touches}x"
+            details["order_block"] = f"bullish OB {bullish_ob['bottom']:.2f}-{bullish_ob['top']:.2f} ({freshness})"
+
+    if bearish_ob:
+        ob_touches = bearish_ob["touches"]
+        max_ob_touches = cfg.get("ob_max_touches", 5)
+        if ob_touches <= max_ob_touches:
+            ob_pts = max(1, round(bearish_ob["strength"] * 2))
+            sell_score += ob_pts
+            sell_factors += 1
+            freshness = "fresh" if ob_touches == 0 else f"touched {ob_touches}x"
+            details["order_block"] = f"bearish OB {bearish_ob['bottom']:.2f}-{bearish_ob['top']:.2f} ({freshness})"
 
     if momentum > 0:
         buy_score += momentum

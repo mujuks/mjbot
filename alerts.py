@@ -87,7 +87,7 @@ def send_webhook(cfg: dict, pair: str, result: dict) -> bool:
 
 
 def format_alert(pair: str, result: dict) -> str:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
         f"[{ts}] {pair} -> {result['signal']}",
         f"  Entry: {result['entry']}",

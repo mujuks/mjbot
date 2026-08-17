@@ -54,20 +54,98 @@ def format_digest(pair: str, result: dict, now_utc: datetime, cfg: dict) -> str:
     return "\n".join(lines)
 
 
+def format_no_signal(pair: str, result: dict, now_utc: datetime, cfg: dict) -> str:
+    bias_label = {1: "bullish", -1: "bearish", 0: "flat"}.get(result.get("bias", 0), "flat")
+    ts = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    details = result.get("details", {})
+    buy_score = details.get("buy_score", 0)
+    sell_score = details.get("sell_score", 0)
+    price = result.get("price", 0)
+    lines = [
+        f"[{ts}] {pair} | No signal yet",
+        f"  Price: {price:.2f}",
+        f"  Bias: {bias_label}",
+        f"  Buy score: {buy_score} | Sell score: {sell_score}",
+    ]
+    if buy_score > sell_score and buy_score >= 2:
+        lines.append(f"  Approaching BUY setup ({buy_score}/{cfg.get('signal_threshold', 3)})")
+    elif sell_score > buy_score and sell_score >= 2:
+        lines.append(f"  Approaching SELL setup ({sell_score}/{cfg.get('signal_threshold', 3)})")
+    else:
+        lines.append("  Market quiet - waiting for setup.")
+    return "\n".join(lines)
+
+
+def format_get_ready(pair: str, result: dict, direction: str, now_utc: datetime) -> str:
+    ts = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    details = result.get("details", {})
+    price = result.get("price", 0)
+    bias_label = details.get("bias", "flat")
+    zone_info = details.get("zone", "none")
+    ob_info = details.get("order_block", "none")
+
+    if direction == "BUY":
+        emoji_dir = "BULLISH"
+        action = "BUY"
+    else:
+        emoji_dir = "BEARISH"
+        action = "SELL"
+
+    lines = [
+        f"[{ts}] {pair} | GET READY - {emoji_dir} SETUP FORMING",
+        f"  Price: {price:.2f}",
+        f"  Bias: {bias_label}",
+        f"  Action: {action}",
+    ]
+    if zone_info != "none":
+        lines.append(f"  Zone: {zone_info}")
+    if ob_info != "none":
+        lines.append(f"  Order Block: {ob_info}")
+    lines.append(f"  Score: {result.get('score', 0)}")
+    lines.append(f"  Waiting for confirmation to enter {action}...")
+    return "\n".join(lines)
+
+
+def format_status(pair: str, result: dict, now_utc: datetime, cfg: dict) -> str:
+    bias_label = {1: "bullish", -1: "bearish", 0: "flat"}.get(result.get("bias", 0), "flat")
+    ts = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    details = result.get("details", {})
+    buy_score = details.get("buy_score", 0)
+    sell_score = details.get("sell_score", 0)
+    price = result.get("price", 0)
+    threshold = cfg.get("signal_threshold", 3)
+    lines = [
+        f"[{ts}] {pair} | Status Update",
+        f"  Price: {price:.2f} | Bias: {bias_label}",
+        f"  Buy: {buy_score}/{threshold} | Sell: {sell_score}/{threshold}",
+    ]
+    if buy_score >= threshold or sell_score >= threshold:
+        lines.append("  Setup active - signal may fire soon")
+    elif buy_score >= 2 or sell_score >= 2:
+        lines.append("  Building momentum - watching closely")
+    else:
+        lines.append("  Market quiet - no setup forming")
+    return "\n".join(lines)
+
+
 def _polling_loop(cfg):
     print(f"Starting Forex signal bot. Pairs: {', '.join(cfg['pairs'])}")
     print(f"Entry timeframe: {cfg['timeframe']} | Bias timeframe: {cfg.get('bias_timeframe', 'none')}")
     print(f"Check every {cfg['interval_seconds']}s | Hourly digest: {cfg.get('hourly_digest', False)}")
-    print("Signals: BUY / SELL / STRONG_BUY / STRONG_SELL\n")
+    print("Signals: BUY / SELL / STRONG_BUY / STRONG_SELL / GET READY / NO SIGNAL\n")
 
     last_signals: dict[str, str] = {}
     last_results: dict[str, dict] = {}
     last_dfs: dict[str, pd.DataFrame] = {}
     last_digest_hour: int | None = None
+    last_status_minute: dict[str, int] = {}
+    last_get_ready: dict[str, str] = {}
+    ready_threshold = cfg.get("get_ready_threshold", 2)
 
     while True:
         now_utc = datetime.now(timezone.utc)
         active = trading_allowed(now_utc, cfg)
+        current_minute = now_utc.hour * 60 + now_utc.minute
 
         for pair in cfg["pairs"]:
             try:
@@ -81,6 +159,10 @@ def _polling_loop(cfg):
                 last_results[pair] = result
                 last_dfs[pair] = df
                 signal = result["signal"]
+                details = result.get("details", {})
+                buy_score = details.get("buy_score", 0)
+                sell_score = details.get("sell_score", 0)
+                threshold = cfg.get("signal_threshold", 3)
 
                 if signal in ("STRONG_BUY", "BUY", "STRONG_SELL", "SELL"):
                     if last_signals.get(pair) != signal:
@@ -92,8 +174,29 @@ def _polling_loop(cfg):
                         if chart:
                             send_telegram_photo(cfg, chart, message)
                         last_signals[pair] = signal
+                        last_get_ready.pop(pair, None)
                 else:
                     last_signals[pair] = "NONE"
+
+                    dominant = "BUY" if buy_score > sell_score else "SELL" if sell_score > buy_score else None
+                    dominant_score = max(buy_score, sell_score) if dominant else 0
+
+                    if dominant and dominant_score >= ready_threshold and dominant_score < threshold:
+                        if last_get_ready.get(pair) != dominant:
+                            message = format_get_ready(pair, result, dominant, now_utc)
+                            print(message)
+                            send_telegram(cfg, message)
+                            last_get_ready[pair] = dominant
+                            last_status_minute[pair] = current_minute
+                    else:
+                        last_get_ready.pop(pair, None)
+
+                    last_minute = last_status_minute.get(pair, -999)
+                    if current_minute - last_minute >= cfg["interval_seconds"] // 60:
+                        message = format_status(pair, result, now_utc, cfg)
+                        print(message)
+                        send_telegram(cfg, message)
+                        last_status_minute[pair] = current_minute
 
             except Exception as e:
                 print(f"[{pair}] Error: {e}", file=sys.stderr)

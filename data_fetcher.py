@@ -1,38 +1,33 @@
 import time as _time
 
 import pandas as pd
-import requests
-
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-}
+import yfinance as yf
 
 
 def fetch_forex_data(symbol: str, interval: str, lookback_days: int = 30) -> pd.DataFrame:
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            r = requests.get(
-                "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol,
-                params={"range": f"{lookback_days}d", "interval": interval, "includePrePost": "false"},
-                headers=_HEADERS,
-                timeout=20,
-            )
-            r.raise_for_status()
-            data = r.json()
-            result = data["chart"]["result"][0]
-            ts = result["timestamp"]
-            q = result["indicators"]["quote"][0]
+            ticker = yf.Ticker(symbol)
+            interval_map = {
+                "1m": "1m", "2m": "2m", "5m": "5m", "15m": "15m", "30m": "30m",
+                "60m": "1h", "1h": "1h", "90m": "90m", "1d": "1d", "5d": "5d",
+            }
+            yf_interval = interval_map.get(interval, interval)
 
-            df = pd.DataFrame({
-                "Open": q["open"],
-                "High": q["high"],
-                "Low": q["low"],
-                "Close": q["close"],
-                "Volume": q.get("volume", [0] * len(ts)),
-            }, index=pd.to_datetime(ts, unit="s", utc=True))
+            if yf_interval in ("1m", "2m", "5m", "15m", "30m"):
+                period_days = min(lookback_days, 60)
+                df = ticker.history(period=f"{period_days}d", interval=yf_interval)
+            else:
+                df = ticker.history(period=f"{lookback_days}d", interval=yf_interval)
 
+            if df.empty:
+                raise ValueError("Empty dataframe returned from yfinance")
+
+            df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+            df.index = df.index.tz_localize("UTC") if df.index.tz is None else df.index
             df = df.dropna()
+
             if df.empty:
                 raise ValueError("Empty dataframe after filtering")
             return df

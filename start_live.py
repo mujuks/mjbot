@@ -4,13 +4,14 @@ import sys
 import os
 import subprocess
 
-sys.path.insert(0, r"C:\Users\Kiongozi Legit\Desktop\mjbot")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from webhook_server import run_server
-from alerts import load_config, send_telegram, send_telegram_photo
+from alerts import load_config, send_telegram, send_telegram_photo, format_alert
 from data_fetcher import fetch_forex_data
 from strategy import analyze, compute_bias
-from chart import generate_signal_chart, format_alert
+from chart import generate_signal_chart
+from bot import _polling_loop
 
 PORT = 8080
 
@@ -63,7 +64,7 @@ def send_startup_signal(webhook_url):
     bias = compute_bias(bdf, cfg)
     result = analyze(df, cfg, bias=bias)
     result["bias"] = bias
-    
+
     ts = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
     msg = (
         f"[{ts}] MJBot LIVE\n\n"
@@ -85,25 +86,30 @@ def send_startup_signal(webhook_url):
     print("Startup message sent to Telegram")
 
 if __name__ == "__main__":
+    cfg = load_config()
+
     print("Starting MJBot with TradingView webhook...\n")
-    
+
+    poll_thread = threading.Thread(target=_polling_loop, args=(cfg,), daemon=True)
+    poll_thread.start()
+    print("Polling loop started in background")
+
     wh_thread = threading.Thread(target=run_server, args=("127.0.0.1", PORT), daemon=True)
     wh_thread.start()
     time.sleep(1)
     print(f"Webhook server running on port {PORT}")
-    
+
     url = start_ssh_tunnel()
     if not url:
         url = start_localtunnel()
-    
+
     if url:
         print(f"\nWebhook URL: {url}/webhook\n")
         send_startup_signal(url)
     else:
         print("Could not create tunnel. Bot running locally on port 8080")
-        cfg = load_config()
         send_telegram(cfg, "MJBot webhook server running on localhost:8080. ngrok needed for TradingView.")
-    
+
     print("\nBot is LIVE. Ctrl+C to stop.")
     try:
         while True:

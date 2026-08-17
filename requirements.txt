@@ -5,3 +5,4 @@ mplfinance==0.12.10b0
 matplotlib>=3.7
 flask>=3.0
 gunicorn>=21.0
+yfinance>=0.2.40

@@ -1,11 +1,18 @@
+import os
 import requests
-import json
 
-API_KEY = "rnd_BfbD9QKspxXaY21vStwBuIS8Y7Bi"
+API_KEY = os.environ.get("RENDER_API_KEY", "")
+if not API_KEY:
+    print("Set RENDER_API_KEY environment variable first")
+    exit(1)
+
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
     "Content-Type": "application/json",
 }
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 payload = {
     "name": "mjbot",
@@ -26,8 +33,8 @@ payload = {
         "numInstances": 1,
     },
     "envVars": [
-        {"key": "TELEGRAM_BOT_TOKEN", "value": "8622042615:AAHFOb88OaVvDQ4fxXJJ6jkPz9KTlI9TMqo"},
-        {"key": "TELEGRAM_CHAT_ID", "value": "2107854099"},
+        {"key": "TELEGRAM_BOT_TOKEN", "value": TELEGRAM_BOT_TOKEN},
+        {"key": "TELEGRAM_CHAT_ID", "value": TELEGRAM_CHAT_ID},
         {"key": "WEBHOOK_HOST", "value": "0.0.0.0"},
         {"key": "PYTHON_VERSION", "value": "3.12.0"},
     ],
