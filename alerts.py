@@ -69,6 +69,8 @@ def format_alert(pair: str, result: dict) -> str:
         f"  Stop Loss: {result['stop_loss']}",
         f"  Take Profit: {result['take_profit']}",
     ]
+    if result.get("live_source"):
+        lines.append(f"  Price source: {result['live_source']}")
     for key, value in result.get("details", {}).items():
         lines.append(f"  {key}: {value}")
     lines.append(f"  Score: {result['score']}")

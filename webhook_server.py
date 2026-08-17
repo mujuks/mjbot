@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from alerts import load_config, format_alert, send_telegram, send_telegram_photo, send_webhook
 from chart import generate_signal_chart
 from data_fetcher import fetch_forex_data
+from live_price import fetch_gold_spot_price
 from strategy import compute_bias
 
 app = Flask(__name__)
@@ -91,6 +92,7 @@ def _send_to_telegram(sig: dict, cfg: dict):
             bias_df = fetch_forex_data(pair, cfg["bias_timeframe"], cfg.get("lookback_days", 30))
             bias = compute_bias(bias_df, cfg)
         df = fetch_forex_data(pair, cfg["timeframe"], cfg.get("lookback_days", 30))
+        live_price, _, _ = fetch_gold_spot_price()
         result = {
             "signal": signal,
             "entry": sig["entry"],
@@ -99,6 +101,7 @@ def _send_to_telegram(sig: dict, cfg: dict):
             "price": sig["price"],
             "score": sig["score"],
             "details": {"bias": bias_label},
+            "live_price": live_price,
         }
         chart = generate_signal_chart(df, cfg, result, pair)
         if chart:

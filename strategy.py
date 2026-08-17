@@ -157,7 +157,7 @@ def _find_nearest_zone(zones: list, price: float, atr_val: float) -> dict | None
     return best
 
 
-def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0) -> dict:
+def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None) -> dict:
     empty = {
         "signal": "NONE", "score": 0, "price": 0.0, "entry": 0.0,
         "stop_loss": 0.0, "take_profit": 0.0, "details": {},
@@ -166,8 +166,15 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0) -> dict:
         return empty
 
     close = df["Close"]
-    price = float(close.iloc[-1])
+    gc_price = float(close.iloc[-1])
     atr_val = float(_atr(df, cfg.get("atr_period", 14)).iloc[-1])
+
+    price_offset = 0.0
+    if live_price and gc_price > 0:
+        price_offset = live_price - gc_price
+        price = live_price
+    else:
+        price = gc_price
 
     momentum = _momentum(close, _atr(df, cfg.get("atr_period", 14)), cfg)
     zones = detect_zones(df, cfg)
@@ -177,54 +184,100 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0) -> dict:
     rsi_val = rsi(close, cfg["rsi_period"]).iloc[-1]
     macd_line, macd_sig, _ = macd(close, cfg["macd_fast"], cfg["macd_slow"], cfg["macd_signal"])
 
+    if price_offset != 0:
+        for z in zones["demand"]:
+            z["bottom"] += price_offset
+            z["top"] += price_offset
+        for z in zones["supply"]:
+            z["bottom"] += price_offset
+            z["top"] += price_offset
+
     demand_zone = _find_nearest_zone(zones["demand"], price, atr_val)
     supply_zone = _find_nearest_zone(zones["supply"], price, atr_val)
 
+    sweep_level = sweep["level"]
+    if sweep_level is not None and price_offset != 0:
+        sweep_level += price_offset
+
     buy_score = 0
     sell_score = 0
+    buy_factors = 0
+    sell_factors = 0
     details = {}
 
+    max_touches = cfg.get("max_zone_touches", 100)
+
     if demand_zone:
-        details["zone"] = f"demand {demand_zone['bottom']:.2f}-{demand_zone['top']:.2f} (touches {demand_zone['touches']})"
-        buy_score += 2
-        if demand_zone["touches"] == 0:
-            buy_score += 1
-    if sweep["bullish"]:
-        details["sweep"] = f"bullish sweep of low {sweep['level']:.2f} ({sweep['bars_ago']} bars ago)"
-        buy_score += 2
+        touches = demand_zone["touches"]
+        if touches <= max_touches:
+            zone_strength = max(0, 2 - touches // 5)
+            buy_score += zone_strength
+            buy_factors += 1
+            fresh_tag = "fresh" if touches == 0 else f"touches {touches}"
+            details["zone"] = f"demand {demand_zone['bottom']:.2f}-{demand_zone['top']:.2f} ({fresh_tag})"
+        else:
+            details["zone"] = f"demand {demand_zone['bottom']:.2f}-{demand_zone['top']:.2f} (exhausted {touches}x)"
+
+    if sweep["bullish"] and sweep_level is not None:
+        bars = sweep["bars_ago"]
+        sweep_pts = max(1, 3 - bars)
+        buy_score += sweep_pts
+        buy_factors += 1
+        details["sweep"] = f"bullish sweep of low {sweep_level:.2f} ({bars} bars ago)"
 
     if supply_zone:
-        details["zone"] = f"supply {supply_zone['bottom']:.2f}-{supply_zone['top']:.2f} (touches {supply_zone['touches']})"
-        sell_score += 2
-        if supply_zone["touches"] == 0:
-            sell_score += 1
-    if sweep["bearish"]:
-        details["sweep"] = f"bearish sweep of high {sweep['level']:.2f} ({sweep['bars_ago']} bars ago)"
-        sell_score += 2
+        touches = supply_zone["touches"]
+        if touches <= max_touches:
+            zone_strength = max(0, 2 - touches // 5)
+            sell_score += zone_strength
+            sell_factors += 1
+            fresh_tag = "fresh" if touches == 0 else f"touches {touches}"
+            details["zone"] = f"supply {supply_zone['bottom']:.2f}-{supply_zone['top']:.2f} ({fresh_tag})"
+        else:
+            details["zone"] = f"supply {supply_zone['bottom']:.2f}-{supply_zone['top']:.2f} (exhausted {touches}x)"
+
+    if sweep["bearish"] and sweep_level is not None:
+        bars = sweep["bars_ago"]
+        sweep_pts = max(1, 3 - bars)
+        sell_score += sweep_pts
+        sell_factors += 1
+        details["sweep"] = f"bearish sweep of high {sweep_level:.2f} ({bars} bars ago)"
 
     if momentum > 0:
         buy_score += momentum
+        buy_factors += 1
         details["momentum"] = "up"
     elif momentum < 0:
         sell_score += -momentum
+        sell_factors += 1
         details["momentum"] = "down"
 
     if vol_score:
         details["volume"] = "spike"
         if momentum > 0:
             buy_score += 1
+            buy_factors += 1
         elif momentum < 0:
             sell_score += 1
+            sell_factors += 1
 
-    if macd_line.iloc[-1] > macd_sig.iloc[-1] and rsi_val < cfg["rsi_overbought"]:
+    macd_bull = macd_line.iloc[-1] > macd_sig.iloc[-1]
+    macd_bear = macd_line.iloc[-1] < macd_sig.iloc[-1]
+    rsi_bull = rsi_val < cfg["rsi_overbought"]
+    rsi_bear = rsi_val > cfg["rsi_oversold"]
+
+    if macd_bull and rsi_bull and rsi_val > cfg.get("rsi_bull_min", 40):
         buy_score += 1
-    elif macd_line.iloc[-1] < macd_sig.iloc[-1] and rsi_val > cfg["rsi_oversold"]:
+        buy_factors += 1
+    elif macd_bear and rsi_bear and rsi_val < cfg.get("rsi_bear_max", 60):
         sell_score += 1
+        sell_factors += 1
 
     details["rsi"] = round(float(rsi_val), 2)
 
     threshold = cfg.get("signal_threshold", 3)
     strong = cfg.get("strong_threshold", 5)
+    min_factors = cfg.get("min_confluence_factors", 3)
     sl_buffer = cfg.get("sl_atr_buffer", 1.0)
     rr = cfg.get("risk_reward", 2.0)
 
@@ -235,30 +288,38 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0) -> dict:
     signal = "NONE"
     entry = sl = tp = price
 
-    if buy_score >= threshold and buy_score > sell_score:
+    if buy_score >= threshold and buy_score > sell_score and buy_factors >= min_factors:
         blocked = bias_filter and bias < 0
         if not blocked:
             signal = "STRONG_BUY" if buy_score >= strong else "BUY"
             entry = price
-            if sweep["bullish"]:
-                sl = min(sweep["level"], demand_zone["bottom"] if demand_zone else price) - sl_buffer * atr_val
+            if sweep["bullish"] and sweep_level is not None:
+                sl = min(sweep_level, demand_zone["bottom"] if demand_zone else price) - sl_buffer * atr_val
             elif demand_zone:
                 sl = demand_zone["bottom"] - sl_buffer * atr_val
             else:
                 sl = price - 2 * sl_buffer * atr_val
             tp = entry + rr * (entry - sl)
-    elif sell_score >= threshold and sell_score > buy_score:
+    elif sell_score >= threshold and sell_score > buy_score and sell_factors >= min_factors:
         blocked = bias_filter and bias > 0
         if not blocked:
             signal = "STRONG_SELL" if sell_score >= strong else "SELL"
             entry = price
-            if sweep["bearish"]:
-                sl = max(sweep["level"], supply_zone["top"] if supply_zone else price) + sl_buffer * atr_val
+            if sweep["bearish"] and sweep_level is not None:
+                sl = max(sweep_level, supply_zone["top"] if supply_zone else price) + sl_buffer * atr_val
             elif supply_zone:
                 sl = supply_zone["top"] + sl_buffer * atr_val
             else:
                 sl = price + 2 * sl_buffer * atr_val
             tp = entry - rr * (sl - entry)
+
+    if price_offset != 0:
+        details["data_source"] = "GC=F calibrated to live XAU/USD spot"
+        details["offset"] = f"{price_offset:.2f}"
+
+    details["buy_score"] = buy_score
+    details["sell_score"] = sell_score
+    details["confluence"] = buy_factors if buy_score > sell_score else sell_factors
 
     return {
         "signal": signal,

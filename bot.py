@@ -8,18 +8,28 @@ import pandas as pd
 from alerts import format_alert, load_config, send_telegram, send_telegram_photo, send_webhook
 from chart import generate_signal_chart
 from data_fetcher import fetch_forex_data
+from live_price import fetch_gold_spot_price, validate_data_freshness, calibrate_to_spot
 from strategy import analyze, compute_bias, trading_allowed
 from webhook_server import run_server
 
 
 def analyze_pair(pair: str, cfg: dict) -> tuple[dict, pd.DataFrame]:
     df = fetch_forex_data(pair, cfg["timeframe"], cfg.get("lookback_days", 30))
+    fresh, age_msg = validate_data_freshness(df, cfg.get("max_data_age_minutes", 60))
+    if not fresh:
+        print(f"  [{pair}] WARNING: {age_msg}")
+
+    live_price, ts, source = fetch_gold_spot_price()
+
     bias = 0
     if cfg.get("bias_enabled", True) and cfg.get("bias_timeframe"):
         bias_df = fetch_forex_data(pair, cfg["bias_timeframe"], cfg.get("lookback_days", 30))
         bias = compute_bias(bias_df, cfg)
-    result = analyze(df, cfg, bias=bias)
+    result = analyze(df, cfg, bias=bias, live_price=live_price)
     result["bias"] = bias
+    if live_price:
+        result["live_price"] = live_price
+        result["live_source"] = source
     return result, df
 
 
