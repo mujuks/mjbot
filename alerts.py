@@ -1,12 +1,35 @@
 import json
+import os
 from datetime import datetime, timezone
 
 import requests
 
 
 def load_config(path: str = "config.json") -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    paths_to_try = [path, "config.example.json"]
+    found = None
+    for p in paths_to_try:
+        full = os.path.join(os.path.dirname(os.path.abspath(__file__)), p)
+        if os.path.exists(full):
+            found = full
+            break
+        if os.path.exists(p):
+            found = p
+            break
+    if found is None:
+        raise FileNotFoundError(f"No config found (tried: {paths_to_try})")
+    with open(found, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    if os.getenv("TELEGRAM_BOT_TOKEN"):
+        cfg.setdefault("telegram", {})["enabled"] = True
+        cfg["telegram"]["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
+    if os.getenv("TELEGRAM_CHAT_ID"):
+        cfg.setdefault("telegram", {})["chat_id"] = os.getenv("TELEGRAM_CHAT_ID")
+    if os.getenv("WEBHOOK_HOST"):
+        cfg.setdefault("webhook_server", {})["host"] = os.getenv("WEBHOOK_HOST")
+    if os.getenv("WEBHOOK_PORT"):
+        cfg.setdefault("webhook_server", {})["port"] = int(os.getenv("WEBHOOK_PORT"))
+    return cfg
 
 
 def send_telegram(cfg: dict, message: str) -> bool:

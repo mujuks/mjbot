@@ -1,0 +1,16 @@
+services:
+  - type: worker
+    name: mjbot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: WEBHOOK_HOST
+        value: "0.0.0.0"
+    startCommand: python bot.py

@@ -12,6 +12,8 @@
   "rsi_period": 14,
   "rsi_overbought": 70,
   "rsi_oversold": 30,
+  "rsi_bull_min": 40,
+  "rsi_bear_max": 60,
   "macd_fast": 12,
   "macd_slow": 26,
   "macd_signal": 9,
@@ -26,8 +28,11 @@
   "volume_mult": 1.5,
   "signal_threshold": 3,
   "strong_threshold": 5,
+  "min_confluence_factors": 3,
+  "max_zone_touches": 100,
   "risk_reward": 2.0,
   "sl_atr_buffer": 1.0,
+  "max_data_age_minutes": 60,
   "sessions": {
     "enabled": true,
     "utc_start": "07:00",
@@ -46,7 +51,7 @@
   },
   "webhook_server": {
     "enabled": true,
-    "host": "127.0.0.1",
+    "host": "0.0.0.0",
     "port": 8080
   }
 }
