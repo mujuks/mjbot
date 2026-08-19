@@ -88,15 +88,55 @@ def send_webhook(cfg: dict, pair: str, result: dict) -> bool:
 
 def format_alert(pair: str, result: dict) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    details = result.get("details", {})
+    signal = result.get("signal", "NONE")
+
+    emoji = "🟢" if "BUY" in signal else "🔴" if "SELL" in signal else "⚪"
+    strength = "STRONG " if "STRONG" in signal else ""
+    direction = "BUY" if "BUY" in signal else "SELL"
+
     lines = [
-        f"[{ts}] {pair} -> {result['signal']}",
-        f"  Entry: {result['entry']}",
-        f"  Stop Loss: {result['stop_loss']}",
-        f"  Take Profit: {result['take_profit']}",
+        f"{emoji} {pair} | {strength}{direction} SIGNAL",
+        f"Time: {ts}",
+        f"Entry: {result['entry']}",
+        f"Stop Loss: {result['stop_loss']}",
+        f"Take Profit: {result['take_profit']}",
     ]
+
+    risk = abs(result["entry"] - result["stop_loss"])
+    if risk > 0:
+        lines.append(f"Risk: {risk:.2f} pts | R:R 1:{result['take_profit'] / risk:.1f}" if result["entry"] != result["stop_loss"] else "")
+
+    if details.get("structure"):
+        lines.append(f"Structure: {details['structure']}")
+    if details.get("structure_event"):
+        lines.append(f"Event: {details['structure_event']}")
+    if details.get("pd_zone"):
+        lines.append(f"Zone: {details['pd_zone']}")
+    if details.get("zone"):
+        lines.append(f"S/D: {details['zone']}")
+    if details.get("sweep"):
+        lines.append(f"Sweep: {details['sweep']}")
+    if details.get("order_block"):
+        lines.append(f"OB: {details['order_block']}")
+    if details.get("fvg"):
+        lines.append(f"FVG: {details['fvg']}")
+    if details.get("momentum"):
+        lines.append(f"Momentum: {details['momentum']}")
+    if details.get("volume"):
+        lines.append(f"Volume: {details['volume']}")
+    if details.get("nearest_bsl"):
+        lines.append(f"BSL Target: {details['nearest_bsl']}")
+    if details.get("nearest_ssl"):
+        lines.append(f"SSL Target: {details['nearest_ssl']}")
+    if details.get("bias"):
+        lines.append(f"Bias: {details['bias']}")
+
     if result.get("live_source"):
-        lines.append(f"  Price source: {result['live_source']}")
-    for key, value in result.get("details", {}).items():
-        lines.append(f"  {key}: {value}")
-    lines.append(f"  Score: {result['score']}")
-    return "\n".join(lines)
+        lines.append(f"Source: {result['live_source']}")
+
+    buy_s = details.get("buy_score", 0)
+    sell_s = details.get("sell_score", 0)
+    lines.append(f"Score: BUY {buy_s} | SELL {sell_s} | Confluence: {details.get('confluence', 0)} factors")
+
+    return "\n".join(line for line in lines if line)

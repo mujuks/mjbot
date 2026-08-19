@@ -22,6 +22,8 @@ def generate_signal_chart(df: pd.DataFrame, cfg: dict, result: dict, pair: str) 
         return None
 
     close = chart_df["Close"]
+    high = chart_df["High"]
+    low = chart_df["Low"]
     atr_val = _atr(chart_df, cfg.get("atr_period", 14))
 
     fast = close.ewm(span=cfg.get("ma_fast", 10), adjust=False).mean()
@@ -32,7 +34,8 @@ def generate_signal_chart(df: pd.DataFrame, cfg: dict, result: dict, pair: str) 
     sl = result.get("stop_loss", 0.0)
     tp = result.get("take_profit", 0.0)
     price = result.get("price", 0.0)
-    bias_label = result.get("details", {}).get("bias", "flat")
+    details = result.get("details", {})
+    bias_label = details.get("bias", "flat")
     score = result.get("score", 0)
 
     add_plots = []
@@ -46,6 +49,10 @@ def generate_signal_chart(df: pd.DataFrame, cfg: dict, result: dict, pair: str) 
         buy_markers.iloc[-1] = chart_df["Low"].iloc[-1] - 0.3 * atr_val.iloc[-1]
     elif signal in ("SELL", "STRONG_SELL"):
         sell_markers.iloc[-1] = chart_df["High"].iloc[-1] + 0.3 * atr_val.iloc[-1]
+    elif signal == "WATCH_BUY":
+        buy_markers.iloc[-1] = chart_df["Low"].iloc[-1] - 0.5 * atr_val.iloc[-1]
+    elif signal == "WATCH_SELL":
+        sell_markers.iloc[-1] = chart_df["High"].iloc[-1] + 0.5 * atr_val.iloc[-1]
 
     if not buy_markers.isna().all():
         add_plots.append(mpf.make_addplot(buy_markers, type="scatter", markersize=120,
@@ -72,24 +79,67 @@ def generate_signal_chart(df: pd.DataFrame, cfg: dict, result: dict, pair: str) 
     ax_main.axhline(y=sl, color="#FF1744", linestyle="--", linewidth=1, alpha=0.8, label=f"SL {sl:.2f}")
     ax_main.axhline(y=tp, color="#00C853", linestyle="--", linewidth=1, alpha=0.8, label=f"TP {tp:.2f}")
 
+    struct_event = details.get("structure_event", "")
+    if "BOS" in struct_event or "CHoCH" in struct_event:
+        level = result.get("entry", 0)
+        for key in ["bos_level", "choch_level"]:
+            if key in details:
+                try:
+                    level = float(details[key])
+                except (ValueError, TypeError):
+                    pass
+        color = "#00E676" if "bull" in struct_event.lower() else "#FF5252"
+        style = "-" if "CHoCH" in struct_event else "--"
+        ax_main.axhline(y=level, color=color, linestyle=style, linewidth=1.5, alpha=0.9)
+        ax_main.text(0.01, level, f" {struct_event}", transform=ax_main.get_yaxis_transform(),
+                     fontsize=7, color=color, fontweight="bold", va="center")
+
+    bsl = details.get("nearest_bsl")
+    ssl = details.get("nearest_ssl")
+    if bsl:
+        try:
+            ax_main.axhline(y=float(bsl), color="#FFD700", linestyle=":", linewidth=0.8, alpha=0.6)
+            ax_main.text(0.99, float(bsl), f" BSL {bsl}", transform=ax_main.get_yaxis_transform(),
+                         fontsize=6, color="#FFD700", ha="right", va="center")
+        except (ValueError, TypeError):
+            pass
+    if ssl:
+        try:
+            ax_main.axhline(y=float(ssl), color="#FF69B4", linestyle=":", linewidth=0.8, alpha=0.6)
+            ax_main.text(0.99, float(ssl), f" SSL {ssl}", transform=ax_main.get_yaxis_transform(),
+                         fontsize=6, color="#FF69B4", ha="right", va="center")
+        except (ValueError, TypeError):
+            pass
+
     signal_colors = {
         "BUY": "#00C853", "STRONG_BUY": "#00E676",
         "SELL": "#FF1744", "STRONG_SELL": "#FF5252",
+        "WATCH_BUY": "#FFC107", "WATCH_SELL": "#FF9800",
     }
     sig_color = signal_colors.get(signal, "#9E9E9E")
     sig_text = signal.replace("_", " ") if signal != "NONE" else "NO SIGNAL"
+    if "WATCH" in signal:
+        sig_text = signal.replace("_", " ") + " (early warning)"
 
     bias_colors = {"bullish": "#00C853", "bearish": "#FF1744", "flat": "#9E9E9E"}
     bias_color = bias_colors.get(bias_label, "#9E9E9E")
 
-    ax_main.legend(loc="upper left", fontsize=8, framealpha=0.7)
+    ax_main.legend(loc="upper left", fontsize=7, framealpha=0.7)
 
-    title = f"{pair} | {sig_text} | Bias: {bias_label.upper()} | Score: {score}"
-    ax_main.set_title(title, fontsize=12, fontweight="bold", color=sig_color, pad=10)
+    pd_zone = details.get("pd_zone", "")
+    struct_str = details.get("structure", "")
+    title_parts = [f"{pair} | {sig_text}"]
+    if struct_str:
+        title_parts.append(f"Struct: {struct_str}")
+    title_parts.append(f"Score: {score}")
+    title = " | ".join(title_parts)
+    ax_main.set_title(title, fontsize=10, fontweight="bold", color=sig_color, pad=10)
 
     subtitle = f"Entry: {entry:.2f}  SL: {sl:.2f}  TP: {tp:.2f}  Price: {price:.2f}"
+    if pd_zone:
+        subtitle += f"  PD: {pd_zone}"
     ax_main.text(0.5, 1.01, subtitle, transform=ax_main.transAxes,
-                 ha="center", fontsize=9, color="#BDBDBD", family="monospace")
+                 ha="center", fontsize=8, color="#BDBDBD", family="monospace")
 
     fig.patch.set_facecolor("#1A1A2E")
     for ax in [ax_main, ax_vol]:
