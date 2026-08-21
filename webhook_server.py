@@ -49,6 +49,12 @@ def _format_tv_alert(tv: dict) -> dict:
         except (TypeError, ValueError):
             return default
 
+    def _int(key, default=0):
+        try:
+            return int(float(tv.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
     return {
         "signal": signal,
         "pair": pair,
@@ -56,7 +62,7 @@ def _format_tv_alert(tv: dict) -> dict:
         "stop_loss": _float("sl", _float("stop_loss")),
         "take_profit": _float("tp", _float("take_profit")),
         "price": _float("close", _float("entry")),
-        "score": int(tv.get("score", 0)),
+        "score": _int("score"),
         "bias": tv.get("bias", "unknown"),
         "timeframe": tv.get("timeframe", tv.get("interval", "15m")),
         "raw": tv,

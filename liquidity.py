@@ -175,23 +175,16 @@ def compute_dynamic_tp(entry: float, sl: float, direction: str, pools: dict, atr
         return entry
 
     min_rr = 1.5
-    targets = []
     if direction == "BUY":
         for t in pools.get("bsl_targets", []):
-            if t["price"] > entry:
-                targets.append(t["price"])
-        if targets:
-            tp = targets[0]
-            if (tp - entry) >= min_rr * risk:
+            tp = t["price"]
+            if tp > entry and (tp - entry) >= min_rr * risk:
                 return tp
         return entry + 2.0 * risk
     else:
         for t in pools.get("ssl_targets", []):
-            if t["price"] < entry:
-                targets.append(t["price"])
-        if targets:
-            tp = targets[0]
-            if (entry - tp) >= min_rr * risk:
+            tp = t["price"]
+            if tp < entry and (entry - tp) >= min_rr * risk:
                 return tp
         return entry - 2.0 * risk
 

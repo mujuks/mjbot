@@ -132,17 +132,56 @@ def _momentum(close: pd.Series, atr_series: pd.Series, cfg: dict) -> int:
     return score
 
 
-def _volume_signal(volume: pd.Series, cfg: dict) -> int:
-    if volume.empty or len(volume) < 2:
+def _volume_weighted_momentum(close: pd.Series, open_: pd.Series,
+                              volume: pd.Series, cfg: dict) -> float:
+    """Volume-weighted momentum score: direction × volume per candle.
+    Returns value between -1.0 and +1.0."""
+    lookback = cfg.get("vw_mom_lookback", 10)
+    n = min(lookback, len(close))
+    if n < 2 or volume.iloc[-n:].sum() == 0:
+        return 0.0
+    c = close.iloc[-n:].to_numpy(float)
+    o = open_.iloc[-n:].to_numpy(float)
+    v = volume.iloc[-n:].to_numpy(float)
+    rets = np.where(o > 0, (c - o) / o, 0.0)
+    weighted = np.sum(v * rets)
+    total_vol = np.sum(v)
+    return float(np.clip(weighted / total_vol * 100 if total_vol else 0, -1.0, 1.0))
+
+
+def _vwap_bias(close: pd.Series, high: pd.Series, low: pd.Series,
+               volume: pd.Series, cfg: dict) -> int:
+    """Session VWAP directional bias. +1 = price above VWAP, -1 = below."""
+    if close.empty or volume.empty:
         return 0
+    lookback = cfg.get("vwap_lookback", 78)
+    n = min(lookback, len(close))
+    c = close.iloc[-n:].to_numpy(float)
+    h = high.iloc[-n:].to_numpy(float)
+    l = low.iloc[-n:].to_numpy(float)
+    v = volume.iloc[-n:].to_numpy(float)
+    typical = (h + l + c) / 3.0
+    total_vol = np.sum(v)
+    if total_vol <= 0:
+        return 0
+    vwap = np.sum(typical * v) / total_vol
+    if c[-1] > vwap:
+        return 1
+    elif c[-1] < vwap:
+        return -1
+    return 0
+
+
+def _volume_climax(volume: pd.Series, cfg: dict) -> bool:
+    """Detect volume climax: current volume > climax_mult × average."""
+    if volume.empty or len(volume) < 5:
+        return False
     period = cfg.get("volume_period", 14)
-    mult = cfg.get("volume_mult", 1.2)
+    climax_mult = cfg.get("climax_mult", 3.0)
     avg = volume.iloc[-min(period, len(volume)):].mean()
     if avg <= 0:
-        return 0
-    if volume.iloc[-1] > mult * avg:
-        return 1
-    return 0
+        return False
+    return bool(volume.iloc[-1] > climax_mult * avg)
 
 
 def _find_nearest_zone(zones: list, price: float, atr_val: float) -> dict | None:
@@ -183,7 +222,9 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
     zones = detect_zones(df, cfg)
     sweep, all_sweeps = detect_liquidity_sweep(df, cfg)
     obs = detect_order_blocks(df, cfg)
-    vol_score = _volume_signal(df["Volume"], cfg)
+    vw_mom = _volume_weighted_momentum(df["Close"], df["Open"], df["Volume"], cfg)
+    vwap_dir = _vwap_bias(df["Close"], df["High"], df["Low"], df["Volume"], cfg)
+    climax = _volume_climax(df["Volume"], cfg)
     structure = analyze_structure(df, cfg)
     pools = detect_liquidity_pools(df, cfg)
     fvg = detect_fvg(df, cfg)
@@ -343,18 +384,22 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
         buy_score += 2
         buy_factors += 1
         details["structure_event"] = f"CHoCH bullish @ {structure.get('choch_level', 0):.2f}"
+        details["choch_level"] = structure.get("choch_level", 0)
     elif event == "CHoCH_BEAR":
         sell_score += 2
         sell_factors += 1
         details["structure_event"] = f"CHoCH bearish @ {structure.get('choch_level', 0):.2f}"
+        details["choch_level"] = structure.get("choch_level", 0)
     elif event == "BOS_BULL":
         buy_score += 1
         buy_factors += 1
         details["structure_event"] = f"BOS bullish @ {structure.get('bos_level', 0):.2f}"
+        details["bos_level"] = structure.get("bos_level", 0)
     elif event == "BOS_BEAR":
         sell_score += 1
         sell_factors += 1
         details["structure_event"] = f"BOS bearish @ {structure.get('bos_level', 0):.2f}"
+        details["bos_level"] = structure.get("bos_level", 0)
 
     pd_zone = pd_info.get("zone", "equilibrium")
     if pd_zone in ("deep_discount", "discount") and buy_score > 0:
@@ -375,14 +420,34 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
         sell_factors += 1
         details["momentum"] = "down"
 
-    if vol_score:
-        details["volume"] = "spike"
+    if vw_mom > 0:
+        vol_pts = max(1, int(round(abs(vw_mom) * 2)))
+        buy_score += vol_pts
+        buy_factors += 1
+        details["volume"] = f"vw_mom +{vw_mom:.2f}"
+    elif vw_mom < 0:
+        vol_pts = max(1, int(round(abs(vw_mom) * 2)))
+        sell_score += vol_pts
+        sell_factors += 1
+        details["volume"] = f"vw_mom {vw_mom:.2f}"
+
+    if climax:
+        details["volume_climax"] = "reversal"
         if buy_score >= sell_score:
-            buy_score += 1
-            buy_factors += 1
-        else:
             sell_score += 1
             sell_factors += 1
+        else:
+            buy_score += 1
+            buy_factors += 1
+
+    if vwap_dir > 0:
+        buy_score += 1
+        buy_factors += 1
+        details["vwap"] = "above"
+    elif vwap_dir < 0:
+        sell_score += 1
+        sell_factors += 1
+        details["vwap"] = "below"
 
     macd_bull = macd_line.iloc[-1] > macd_sig.iloc[-1]
     macd_bear = macd_line.iloc[-1] < macd_sig.iloc[-1]
@@ -546,9 +611,32 @@ def build_signal_series(df: pd.DataFrame, cfg: dict, bias: np.ndarray | None = N
     strong_dn = (diff < 0) & (body > atr_ma * atr_s)
     momentum = np.where(fast > slow, 1, -1) + np.where(strong_up, 1, np.where(strong_dn, -1, 0))
 
+    vw_mom_lookback = cfg.get("vw_mom_lookback", 10)
+    opens = df["Open"].to_numpy(float)
+    vw_mom = np.zeros(n, float)
+    for i in range(1, n):
+        lb = min(vw_mom_lookback, i + 1)
+        c_slice = close[i - lb + 1:i + 1]
+        o_slice = opens[i - lb + 1:i + 1]
+        v_slice = vol[i - lb + 1:i + 1]
+        total_v = np.sum(v_slice)
+        if total_v > 0 and np.all(o_slice > 0):
+            rets = (c_slice - o_slice) / o_slice
+            vw_mom[i] = np.clip(np.sum(v_slice * rets) / total_v * 100, -1.0, 1.0)
+
+    vwap_lookback = cfg.get("vwap_lookback", 78)
+    typical = (high + low + close) / 3.0
+    tv_series = pd.Series(typical * vol).rolling(vwap_lookback, min_periods=1).sum()
+    v_series = pd.Series(vol).rolling(vwap_lookback, min_periods=1).sum()
+    vwap_arr = np.full(n, np.nan)
+    valid = v_series.to_numpy() > 0
+    vwap_arr[valid] = (tv_series.to_numpy()[valid] / v_series.to_numpy()[valid])
+    vwap_bias = np.where(close > vwap_arr, 1, np.where(close < vwap_arr, -1, 0)).astype(int)
+
     vol_period = cfg.get("volume_period", 14)
     vol_avg = pd.Series(vol).rolling(vol_period, min_periods=1).mean().to_numpy(float)
-    vol_spike = (vol > cfg.get("volume_mult", 1.2) * vol_avg) & (vol_avg > 0)
+    climax_mult = cfg.get("climax_mult", 3.0)
+    climax = (vol > climax_mult * vol_avg) & (vol_avg > 0)
 
     rsi_val = rsi(df["Close"], cfg["rsi_period"]).to_numpy(float)
     macd_line, macd_sig, _ = macd(df["Close"], cfg["macd_fast"], cfg["macd_slow"], cfg["macd_signal"])
@@ -678,8 +766,20 @@ def build_signal_series(df: pd.DataFrame, cfg: dict, bias: np.ndarray | None = N
     sell_score[sweep_bear] += 2
     buy_score += np.maximum(momentum, 0)
     sell_score += np.maximum(-momentum, 0)
-    buy_score[vol_spike & (momentum > 0)] += 1
-    sell_score[vol_spike & (momentum < 0)] += 1
+
+    vw_buy = (vw_mom > 0).astype(int) * np.maximum(1, np.round(np.abs(vw_mom) * 2).astype(int))
+    vw_sell = (vw_mom < 0).astype(int) * np.maximum(1, np.round(np.abs(vw_mom) * 2).astype(int))
+    buy_score += vw_buy
+    sell_score += vw_sell
+
+    climax_sell = climax & (buy_score >= sell_score)
+    climax_buy = climax & (sell_score > buy_score)
+    buy_score[climax_buy] += 1
+    sell_score[climax_sell] += 1
+
+    buy_score[vwap_bias > 0] += 1
+    sell_score[vwap_bias < 0] += 1
+
     buy_score[bullish_f] += 1
     sell_score[bearish_f] += 1
 

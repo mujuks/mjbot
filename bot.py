@@ -183,7 +183,7 @@ def _polling_loop(cfg):
     while True:
         now_utc = datetime.now(timezone.utc)
         active = trading_allowed(now_utc, cfg)
-        current_minute = now_utc.hour * 60 + now_utc.minute
+        current_minute = int(now_utc.timestamp() // 60)
 
         for pair in cfg["pairs"]:
             try:
@@ -302,6 +302,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     try:
         main()
     except KeyboardInterrupt:

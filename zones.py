@@ -77,7 +77,7 @@ def detect_zones(df: pd.DataFrame, cfg: dict) -> dict:
             ahead = close.iloc[min(idx + 1 + right, n - 1)]
             move = high.iloc[idx] - ahead
             if move > move_atr * atr.iloc[idx]:
-                touches = _count_touches(high, idx + 1, n, base_low)
+                touches = _count_touches(high, idx + 1, n, base_low, above=True)
                 mitigated = _check_mitigated(close, idx, n, base_low, direction="supply")
                 impulse_strength = min(1.0, move / (2 * atr.iloc[idx]))
                 avg_vol = volume.iloc[max(0, idx - 20):idx].mean() if idx > 0 else 0
@@ -117,11 +117,15 @@ def _check_mitigated(close: pd.Series, zone_idx: int, n: int, level: float, dire
     return False
 
 
-def _count_touches(series: pd.Series, start: int, end: int, level: float) -> int:
+def _count_touches(series: pd.Series, start: int, end: int, level: float, above: bool = False) -> int:
     count = 0
     for i in range(start, end):
-        if series.iloc[i] <= level:
-            count += 1
+        if above:
+            if series.iloc[i] >= level:
+                count += 1
+        else:
+            if series.iloc[i] <= level:
+                count += 1
     return count
 
 

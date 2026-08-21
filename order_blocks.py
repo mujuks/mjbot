@@ -49,7 +49,7 @@ def detect_order_blocks(df: pd.DataFrame, cfg: dict) -> dict:
             if max_move > atr_mult * atr[i] and move_up > 0:
                 bos_confirmed = False
                 for ph_idx, ph_price in pivot_highs:
-                    if ph_idx > i and ph_idx <= i + 6 and closes[min(ph_idx, n - 1)] > ph_price:
+                    if ph_idx > i and ph_idx <= i + 6 and np.any(closes[i + 1:ph_idx + 1] > ph_price):
                         bos_confirmed = True
                         break
 
@@ -84,7 +84,7 @@ def detect_order_blocks(df: pd.DataFrame, cfg: dict) -> dict:
             if max_move > atr_mult * atr[i] and move_down > 0:
                 bos_confirmed = False
                 for sl_idx, sl_price in pivot_lows:
-                    if sl_idx > i and sl_idx <= i + 6 and closes[min(sl_idx, n - 1)] < sl_price:
+                    if sl_idx > i and sl_idx <= i + 6 and np.any(closes[i + 1:sl_idx + 1] < sl_price):
                         bos_confirmed = True
                         break
 
