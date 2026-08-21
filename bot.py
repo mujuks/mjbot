@@ -10,7 +10,9 @@ import pandas as pd
 from alerts import format_alert, load_config, send_telegram, send_telegram_photo, send_webhook
 from chart import generate_signal_chart
 from data_fetcher import fetch_forex_data
+from data_store import append_candles
 from live_price import fetch_gold_spot_price, validate_data_freshness, calibrate_to_spot
+from quant import assess_signal, suggested_risk_pct
 from strategy import analyze, compute_bias, trading_allowed
 
 
@@ -117,6 +119,10 @@ def format_get_ready(pair: str, result: dict, direction: str, now_utc: datetime)
     buy_s = details.get("buy_score", 0)
     sell_s = details.get("sell_score", 0)
     lines.append(f"  Score: BUY {buy_s} | SELL {sell_s}")
+    if details.get("p_win") is not None:
+        lines.append(f"  Win Prob: {details['p_win'] * 100:.0f}%")
+    if details.get("gated_from"):
+        lines.append(f"  Quant gate demoted {details['gated_from']} (low confidence)")
     lines.append(f"  Waiting for {direction} confirmation...")
     return "\n".join(lines)
 
@@ -212,11 +218,37 @@ def _polling_loop(cfg):
 
                 last_results[pair] = result
                 last_dfs[pair] = df
+                try:
+                    append_candles(pair, cfg["timeframe"], df)
+                except Exception as se:
+                    print(f"[{pair}] store error: {se}", file=sys.stderr)
                 signal = result["signal"]
                 details = result.get("details", {})
                 buy_score = details.get("buy_score", 0)
                 sell_score = details.get("sell_score", 0)
                 threshold = cfg.get("signal_threshold", 3)
+
+                qcfg = cfg.get("quant", {})
+                if qcfg.get("enabled", True):
+                    try:
+                        assess = assess_signal(pair, df, result, cfg)
+                    except Exception as qe:
+                        print(f"[{pair}] quant error: {qe}", file=sys.stderr)
+                        assess = None
+                    if assess:
+                        p_win = assess.get("p_win")
+                        if p_win is not None and signal in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
+                            details["p_win"] = round(p_win, 3)
+                            risk_pct = suggested_risk_pct(p_win, cfg)
+                            if risk_pct is not None:
+                                details["risk_suggested"] = f"{risk_pct}%"
+                            min_p = float(qcfg.get("min_probability", 0.55))
+                            if p_win < min_p:
+                                details["gated_from"] = signal
+                                signal = "WATCH_BUY" if "BUY" in signal else "WATCH_SELL"
+                                result["signal"] = signal
+                        elif p_win is None and assess.get("error"):
+                            print(f"[{pair}] quant: {assess['error']}", file=sys.stderr)
 
                 if signal in ("STRONG_BUY", "BUY", "STRONG_SELL", "SELL"):
                     if last_signals.get(pair) != signal:
@@ -303,8 +335,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     except Exception:
         pass
     try:

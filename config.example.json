@@ -1,62 +1,84 @@
 {
-  "pairs": [
-    "GC=F"
-  ],
-  "timeframe": "15m",
-  "bias_timeframe": "1h",
-  "bias_enabled": true,
-  "interval_seconds": 900,
-  "lookback_days": 30,
-  "ma_fast": 10,
-  "ma_slow": 30,
-  "rsi_period": 14,
-  "rsi_overbought": 70,
-  "rsi_oversold": 30,
-  "rsi_bull_min": 40,
-  "rsi_bear_max": 60,
-  "macd_fast": 12,
-  "macd_slow": 26,
-  "macd_signal": 9,
-  "atr_period": 14,
-  "market_mover_atr": 1.0,
-  "zone_left": 2,
-  "zone_right": 2,
-  "zone_move_atr": 1.5,
-  "sweep_pivot": 2,
-  "sweep_window": 2,
-  "ob_move_atr": 2.0,
-  "ob_lookback": 50,
-  "ob_min_move": 2,
-  "ob_max_dist_atr": 1.5,
-  "ob_max_touches": 5,
-  "volume_period": 20,
-  "volume_mult": 1.5,
-  "signal_threshold": 3,
-  "strong_threshold": 5,
-  "min_confluence_factors": 3,
-  "max_zone_touches": 100,
-  "risk_reward": 2.0,
-  "sl_atr_buffer": 1.0,
-  "max_data_age_minutes": 60,
-  "sessions": {
-    "enabled": true,
-    "utc_start": "07:00",
-    "utc_end": "21:00",
-    "days": [0, 1, 2, 3, 4]
-  },
-  "blackout_windows": [],
-  "hourly_digest": true,
-  "telegram": {
-    "enabled": true,
-    "bot_token": "YOUR_BOT_TOKEN",
-    "chat_id": "YOUR_CHAT_ID"
-  },
-  "webhook": {
-    "url": ""
-  },
-  "webhook_server": {
-    "enabled": true,
-    "host": "0.0.0.0",
-    "port": 8080
-  }
+    "pairs":  [
+                  "GC=F"
+              ],
+    "timeframe":  "15m",
+    "bias_timeframe":  "1h",
+    "bias_enabled":  true,
+    "interval_seconds":  900,
+    "lookback_days":  30,
+    "ma_fast":  10,
+    "ma_slow":  30,
+    "rsi_period":  14,
+    "rsi_overbought":  70,
+    "rsi_oversold":  30,
+    "rsi_bull_min":  40,
+    "rsi_bear_max":  60,
+    "macd_fast":  12,
+    "macd_slow":  26,
+    "macd_signal":  9,
+    "atr_period":  14,
+    "market_mover_atr":  1.0,
+    "zone_left":  2,
+    "zone_right":  2,
+    "zone_move_atr":  1.5,
+    "sweep_pivot":  2,
+    "sweep_window":  2,
+    "ob_move_atr":  2.0,
+    "ob_lookback":  50,
+    "ob_min_move":  2,
+    "ob_max_dist_atr":  1.5,
+    "ob_max_touches":  5,
+    "volume_period":  20,
+    "volume_mult":  1.5,
+    "signal_threshold":  3,
+    "strong_threshold":  5,
+    "min_confluence_factors":  3,
+    "max_zone_touches":  100,
+    "risk_reward":  2.0,
+    "sl_atr_buffer":  1.0,
+    "max_data_age_minutes":  60,
+    "sessions":  {
+                     "enabled":  true,
+                     "utc_start":  "07:00",
+                     "utc_end":  "21:00",
+                     "days":  [
+                                  0,
+                                  1,
+                                  2,
+                                  3,
+                                  4
+                              ]
+                 },
+    "blackout_windows":  [
+
+                         ],
+    "hourly_digest":  true,
+    "telegram":  {
+                     "enabled":  true,
+                     "bot_token":  "YOUR_BOT_TOKEN",
+                     "chat_id":  "YOUR_CHAT_ID"
+                 },
+    "webhook":  {
+                    "url":  ""
+                },
+    "quant":  {
+                  "enabled":  true,
+                  "min_probability":  0.55,
+                  "retrain_hours":  6,
+                  "horizon_bars":  60,
+                  "embargo_bars":  30,
+                  "walk_forward_folds":  4,
+                  "min_train_events":  60,
+                  "timeout_floor_atr":  0.25,
+                  "l2":  0.5,
+                  "base_risk_pct":  1.0,
+                  "cost_points":  0.35,
+                  "train_days":  45
+              },
+    "webhook_server":  {
+                           "enabled":  true,
+                           "host":  "0.0.0.0",
+                           "port":  8080
+                       }
 }

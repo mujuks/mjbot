@@ -105,7 +105,8 @@ def format_alert(pair: str, result: dict) -> str:
 
     risk = abs(result["entry"] - result["stop_loss"])
     if risk > 0:
-        lines.append(f"Risk: {risk:.2f} pts | R:R 1:{result['take_profit'] / risk:.1f}" if result["entry"] != result["stop_loss"] else "")
+        rr = abs(result["take_profit"] - result["entry"]) / risk
+        lines.append(f"Risk: {risk:.2f} pts | R:R 1:{rr:.1f}")
 
     if details.get("structure"):
         lines.append(f"Structure: {details['structure']}")
@@ -131,6 +132,10 @@ def format_alert(pair: str, result: dict) -> str:
         lines.append(f"SSL Target: {details['nearest_ssl']}")
     if details.get("bias"):
         lines.append(f"Bias: {details['bias']}")
+    if details.get("p_win") is not None:
+        lines.append(f"Win Prob: {details['p_win'] * 100:.0f}%")
+    if details.get("risk_suggested"):
+        lines.append(f"Suggested Risk: {details['risk_suggested']}")
 
     if result.get("live_source"):
         lines.append(f"Source: {result['live_source']}")
