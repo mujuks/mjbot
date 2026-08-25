@@ -1,13 +1,17 @@
 //@version=5
-// Gold Signal Bot - Pine Script replica
-// 15m scalp entries + 1h bias filter + London/NY session filter
-// Supply/Demand + Liquidity Sweep + Momentum + Volume confluence
-// Mirrors the Python strategy in mjbot (GC=F). Paste on a 15m chart.
-strategy("Gold Signal Bot (MJBot)", shorttitle="GoldSignals", overlay=true,
+// Gold Signal Bot (MJBot) - Pine Script replica v2
+// Mirrors the current Python strategy: 5m entries + 15m bias + SMC confluence.
+// Paste on an OANDA:XAUUSD 5-minute chart (same feed the Python bot uses).
+//
+// CONNECT TO MJBOT:
+//   1. Create Alert -> Condition: this indicator -> "Any alert() function call"
+//   2. Webhook URL: your public tunnel URL + /webhook  (see tunnel.py)
+//   3. The alert() JSON below is already formatted for webhook_server.py
+strategy("Gold Signal Bot (MJBot) v2", shorttitle="GoldSignals", overlay=true,
      initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
      commission_type=strategy.commission.percent, commission_value=0.05)
 
-// ---------- Inputs ----------
+// ---------- Inputs (defaults match config.json) ----------
 maFast    = input.int(10,    "MA fast",    minval=1)
 maSlow    = input.int(30,    "MA slow",    minval=1)
 rsiPer    = input.int(14,    "RSI period", minval=1)
@@ -17,26 +21,27 @@ macdF     = input.int(12,    "MACD fast")
 macdS     = input.int(26,    "MACD slow")
 macdSig   = input.int(9,     "MACD signal")
 atrPer    = input.int(14,    "ATR period")
-zoneMove  = input.float(1.5, "Zone move (ATR mult)")
+moverAtr  = input.float(0.5, "Market mover (ATR mult)")   // market_mover_atr
+zoneMove  = input.float(1.0, "Zone proximity (ATR mult)")
 sweepPiv  = input.int(2,     "Sweep pivot window")
-sweepWin  = input.int(2,     "Sweep recent window")
-volMult   = input.float(1.5, "Volume spike mult")
-sigThresh = input.int(3,     "Signal threshold")
-strThresh = input.int(5,     "Strong threshold")
+sweepWin  = input.int(4,     "Sweep recent window")        // sweep_window
+volMult   = input.float(1.2, "Volume spike mult")           // volume_mult
+sigThresh = input.int(2,     "Signal threshold")            // signal_threshold
+strThresh = input.int(4,     "Strong threshold")            // strong_threshold
 slBuff    = input.float(1.0, "SL buffer (ATR)")
 riskRew   = input.float(2.0, "Risk reward")
 zonePiv   = input.int(2,     "Zone pivot window")
-biasTf    = input.timeframe("60", "Bias timeframe")
-biasOn    = input.bool(true, "Apply 1h bias filter")
-sessOn    = input.bool(true, "Apply session filter (London/NY)")
+biasTf    = input.timeframe("15", "Bias timeframe")         // bias_timeframe
+biasOn    = input.bool(true,  "Apply bias filter")
+sessOn    = input.bool(false, "Apply session filter (London/NY)")  // sessions.enabled=false
 sessStart = input.int(7,  "Session start UTC hour", minval=0, maxval=23)
 sessEnd   = input.int(21, "Session end UTC hour",   minval=1, maxval=24)
 
 // ---------- Higher-timeframe bias ----------
-[hfFast, hfSlow] = request.security(syminfo.tickerid, biasTf, [ta.ema(close, maFast), ta.ema(close, maSlow)])
+[hfFast, hfSlow] = request.security(syminfo.tickerid, biasTf, [ta.ema(close, maFast), ta.ema(close, maSlow)], lookahead=barmerge.lookahead_off)
 bias = hfFast > hfSlow ? 1 : hfFast < hfSlow ? -1 : 0
 
-// ---------- Session filter (UTC, Mon-Fri) ----------
+// ---------- Session filter ----------
 dow   = dayofweek(time, "UTC")
 hourU = hour(time, "UTC")
 inSession = not sessOn or (dow >= dayofweek.monday and dow <= dayofweek.friday and hourU >= sessStart and hourU < sessEnd)
@@ -49,12 +54,12 @@ rsiV  = ta.rsi(close, rsiPer)
 atrV  = ta.atr(atrPer)
 volAvg = ta.sma(volume, 20)
 
-// Momentum: trend + strong candle
-moveUp   = close - close[1] > atrV * 1.0
-moveDown = close - close[1] < -atrV * 1.0
+// Momentum: EMA trend + strong candle (market_mover_atr)
+moveUp   = close - close[1] > atrV * moverAtr
+moveDown = close - close[1] < -atrV * moverAtr
 momentum = (emaF > emaS ? 1 : -1) + (moveUp ? 1 : moveDown ? -1 : 0)
 
-// Liquidity sweep: price wicks through recent pivot then closes back
+// Liquidity sweep: wick through recent pivot then close back
 sweepBear = false
 sweepBull = false
 sweepBearLevel = na
@@ -69,14 +74,14 @@ for i = 1 to sweepWin
         sweepBull := true
         sweepBullLevel := pl
 
-// Supply/Demand zones (recent swing high/low + base)
+// Supply/Demand zones (recent pivots)
 swHi = ta.pivothigh(high, zonePiv, zonePiv)
 swLo = ta.pivotlow(low, zonePiv, zonePiv)
 zoneHi = ta.valuewhen(not na(swHi), swHi, 0)
 zoneLo = ta.valuewhen(not na(swLo), swLo, 0)
 
-nearDemand = not na(swLo) and (swLo - close) <= 1.5 * atrV and (swLo - close) >= -1.5 * atrV
-nearSupply = not na(swHi) and (close - swHi) <= 1.5 * atrV and (close - swHi) >= -1.5 * atrV
+nearDemand = not na(swLo) and math.abs(swLo - close) <= zoneMove * atrV
+nearSupply = not na(swHi) and math.abs(close - swHi) <= zoneMove * atrV
 
 // Volume confirmation
 volSpike = volume > volMult * volAvg
@@ -91,7 +96,7 @@ sellScore += sweepBear ? 2 : 0
 buyScore  += momentum > 0 ? momentum : 0
 sellScore += momentum < 0 ? -momentum : 0
 buyScore  += volSpike and momentum > 0 ? 1 : 0
-sellScore += volSpike and momentum < 0 ? 1 : 0
+sellScore  += volSpike and momentum < 0 ? 1 : 0
 buyScore  += macdLine > macdSigLine and rsiV < rsiOb ? 1 : 0
 sellScore += macdLine < macdSigLine and rsiV > rsiOs ? 1 : 0
 
@@ -108,21 +113,22 @@ if biasOn
     if bias > 0 and (signal == "SELL" or signal == "STRONG_SELL")
         signal := ""
 
-// Session filter: no signals outside London/NY
 if not inSession
     signal := ""
 
 // Entry / SL / TP
-var float entryPx = na
 var float slPx = na
 var float tpPx = na
-if signal == "BUY" or signal == "STRONG_BUY"
+longFire  = signal == "BUY" or signal == "STRONG_BUY"
+shortFire = signal == "SELL" or signal == "STRONG_SELL"
+
+if longFire
     slBase = na(sweepBullLevel) ? (na(zoneLo) ? close : zoneLo) : math.min(sweepBullLevel, na(zoneLo) ? close : zoneLo)
     slPx := slBase - slBuff * atrV
     tpPx := close + riskRew * (close - slPx)
     strategy.entry("Long", strategy.long)
     strategy.exit("LongExit", "Long", stop=slPx, limit=tpPx)
-else if signal == "SELL" or signal == "STRONG_SELL"
+else if shortFire
     slBase = na(sweepBearLevel) ? (na(zoneHi) ? close : zoneHi) : math.max(sweepBearLevel, na(zoneHi) ? close : zoneHi)
     slPx := slBase + slBuff * atrV
     tpPx := close - riskRew * (slPx - close)
@@ -139,6 +145,7 @@ bgcolor(signal == "BUY" ? color.new(color.green, 85) : signal == "STRONG_BUY" ? 
 
 bias_label = bias > 0 ? "bullish" : bias < 0 ? "bearish" : "flat"
 
-if signal != ""
-    json_msg = '{"signal":"' + signal + '","symbol":"' + syminfo.ticker + '","entry":' + str.tostring(close) + ',"sl":' + str.tostring(slPx) + ',"tp":' + str.tostring(tpPx) + ',"score":' + str.tostring(buyScore + sellScore) + ',"bias":"' + bias_label + '","timeframe":"' + timeframe.period + '"}'
-    alert(message=json_msg, freq=alert.freq_once_per_bar)
+// ---------- Alert -> MJBot webhook_server.py ----------
+if longFire or shortFire
+    json_msg = '{"signal":"' + signal + '","symbol":"' + syminfo.ticker + '","close":' + str.tostring(close) + ',"entry":' + str.tostring(close) + ',"sl":' + str.tostring(slPx) + ',"tp":' + str.tostring(tpPx) + ',"score":' + str.tostring(math.max(buyScore, sellScore)) + ',"bias":"' + bias_label + '","timeframe":"' + timeframe.period + '"}'
+    alert(message=json_msg, freq=alert.freq_once_per_bar_close)

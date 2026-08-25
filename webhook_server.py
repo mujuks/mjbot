@@ -29,6 +29,15 @@ def _load_cfg():
     return load_config()
 
 
+def _map_symbol(symbol: str) -> str:
+    s = symbol.upper()
+    if s in PAIRS_MAP:
+        return PAIRS_MAP[s]
+    if s.endswith("XAUUSD") or s.endswith(":GOLD"):
+        return "GC=F"
+    return s
+
+
 def _format_tv_alert(tv: dict) -> dict:
     raw_signal = tv.get("signal", tv.get("action", "NONE")).upper().replace(" ", "_")
     signal_map = {
@@ -40,7 +49,7 @@ def _format_tv_alert(tv: dict) -> dict:
     }
     signal = signal_map.get(raw_signal, raw_signal)
     symbol = tv.get("symbol", tv.get("ticker", "GC=F")).upper()
-    pair = PAIRS_MAP.get(symbol, symbol)
+    pair = _map_symbol(symbol)
 
     def _float(key, default=0.0):
         val = tv.get(key, default)

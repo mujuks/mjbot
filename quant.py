@@ -14,7 +14,9 @@ Design notes
 - Gating: p_win >= min_probability keeps a firm BUY/SELL; below that the bot
   demotes to WATCH_*. Confidence above threshold scales suggested risk.
 """
+import sys
 import time
+import traceback
 from datetime import timezone
 
 import numpy as np
@@ -248,7 +250,9 @@ def _training_frame(pair: str | None, df: pd.DataFrame, cfg: dict) -> pd.DataFra
     if pair:
         store = load_candles(pair, cfg["timeframe"])
         if store is not None and len(store):
-            full = pd.concat([store[~store.index.isin(df.index)], df]).sort_index()
+            full = pd.concat([store[~store.index.isin(df.index)], df])
+            full.index = pd.to_datetime(pd.Index(full.index), utc=True).tz_convert(df.index.tz)
+            full = full.sort_index()
             full = full[~full.index.duplicated(keep="last")]
             cutoff = full.index[-1] - pd.Timedelta(days=train_days)
             full = full[full.index >= cutoff]
@@ -371,6 +375,7 @@ def assess_signal(pair: str, df: pd.DataFrame, result: dict, cfg: dict) -> dict 
             }
             _cache[pair] = c
         except Exception:
+            traceback.print_exc(file=sys.stderr)
             if c is None:
                 return {"p_win": None, "error": "model unavailable"}
             c["epoch"] = now

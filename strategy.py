@@ -199,6 +199,209 @@ def _find_nearest_zone(zones: list, price: float, atr_val: float) -> dict | None
     return best
 
 
+def _fib_ote(df: pd.DataFrame, atr_val: float, lookback: int = 90) -> dict | None:
+    """Fibonacci retracement of the latest displacement leg (ICT OTE model).
+
+    Measures the most recent confirmed swing pair (pivot low -> pivot high for
+    an up leg, or pivot high -> pivot low for a down leg) and computes how far
+    price has pulled back into it. The professional entry band is 62-79%
+    (the OTE / golden pocket region).
+
+    Returns None when no qualifying leg exists (range < 1.5 ATR), else:
+        direction ('bull'|'bear'), level_low, level_high, retrace (0-1),
+        in_ote (bool)
+    """
+    n = len(df)
+    if n < 40 or not atr_val or atr_val != atr_val:
+        return None
+    hi, lo, close_col = df["High"], df["Low"], df["Close"]
+    close = float(close_col.iloc[-1])
+    L = R = 2
+
+    raw_pivots: list[tuple[int, str, float]] = []
+    start = max(L, n - lookback)
+    for i in range(start, n - R):
+        win_hi = hi.iloc[i - L:i + R + 1]
+        win_lo = lo.iloc[i - L:i + R + 1]
+        if hi.iloc[i] == win_hi.max():
+            raw_pivots.append((i, "H", float(hi.iloc[i])))
+        elif lo.iloc[i] == win_lo.min():
+            raw_pivots.append((i, "L", float(lo.iloc[i])))
+
+    # collapse consecutive same-type pivots, keeping the extreme price
+    pivots: list[tuple[int, str, float]] = []
+    for idx, kind, px in raw_pivots:
+        if pivots and pivots[-1][1] == kind:
+            prev = pivots[-1]
+            kept = px if ((kind == "H") == (px >= prev[2])) else prev[2]
+            pivots[-1] = (prev[0], kind, kept)
+        else:
+            pivots.append((idx, kind, px))
+    if len(pivots) < 2:
+        return None
+
+    (_, t1, v1), (_, t2, v2) = pivots[-2], pivots[-1]
+    if t1 == "L" and t2 == "H" and v2 > v1:
+        direction, leg_lo, leg_hi = "bull", v1, v2
+    elif t1 == "H" and t2 == "L" and v2 < v1:
+        direction, leg_lo, leg_hi = "bear", v2, v1
+    else:
+        return None
+
+    if leg_hi - leg_lo < 1.5 * atr_val:
+        return None
+
+    rng = leg_hi - leg_lo
+    retrace = (leg_hi - close) / rng if direction == "bull" else (close - leg_lo) / rng
+    retrace = max(0.0, min(1.5, retrace))
+    return {
+        "direction": direction,
+        "level_low": leg_lo,
+        "level_high": leg_hi,
+        "retrace": round(retrace, 3),
+        "in_ote": 0.62 <= retrace <= 0.79,
+    }
+
+
+def _detect_candlestick_patterns(df: pd.DataFrame) -> dict:
+    """Detect high-probability scalping candlestick patterns."""
+    if df is None or df.empty or len(df) < 4:
+        return {"pattern": None, "direction": 0}
+
+    o = df["Open"].values
+    h = df["High"].values
+    l = df["Low"].values
+    c = df["Close"].values
+    n = len(df)
+
+    curr_o, curr_h, curr_l, curr_c = o[-1], h[-1], l[-1], c[-1]
+    prev_o, prev_h, prev_l, prev_c = o[-2], h[-2], l[-2], c[-2]
+    prev2_o, prev2_h, prev2_l, prev2_c = o[-3], h[-3], l[-3], c[-3]
+
+    curr_body = abs(curr_c - curr_o)
+    curr_range = curr_h - curr_l if curr_h > curr_l else 0.001
+    prev_body = abs(prev_c - prev_o)
+    prev_range = prev_h - prev_l if prev_h > prev_l else 0.001
+
+    # Bullish engulfing
+    if (curr_c > curr_o and prev_c < prev_o
+            and curr_c > prev_o and curr_o < prev_c
+            and curr_body > prev_body * 0.8):
+        return {"pattern": "bullish_engulfing", "direction": 1, "strength": 0.8}
+
+    # Bearish engulfing
+    if (curr_c < curr_o and prev_c > prev_o
+            and curr_c < prev_o and curr_o > prev_c
+            and curr_body > prev_body * 0.8):
+        return {"pattern": "bearish_engulfing", "direction": -1, "strength": 0.8}
+
+    # Bullish pin bar (hammer) - long lower wick, small body at top
+    lower_wick = min(curr_o, curr_c) - curr_l
+    upper_wick = curr_h - max(curr_o, curr_c)
+    if lower_wick > 2.0 * curr_body and upper_wick < curr_body * 0.5 and curr_range > 0:
+        return {"pattern": "bullish_pin_bar", "direction": 1, "strength": 0.7}
+
+    # Bearish pin bar (shooting star) - long upper wick, small body at bottom
+    if upper_wick > 2.0 * curr_body and lower_wick < curr_body * 0.5 and curr_range > 0:
+        return {"pattern": "bearish_pin_bar", "direction": -1, "strength": 0.7}
+
+    # Bullish inside bar breakout (current candle breaks above inside bar high)
+    if prev_h < prev2_h and prev_l > prev2_l:
+        if curr_c > prev_h and curr_c > curr_o:
+            return {"pattern": "inside_bar_breakout_bull", "direction": 1, "strength": 0.6}
+        if curr_c < prev_l and curr_c < curr_o:
+            return {"pattern": "inside_bar_breakout_bear", "direction": -1, "strength": 0.6}
+
+    # Momentum candle (strong close near high/low with volume)
+    if curr_range > 0:
+        close_location = (curr_c - curr_l) / curr_range if curr_c > curr_o else (curr_h - curr_c) / curr_range
+        if close_location > 0.85 and curr_body > 0.6 * curr_range:
+            d = 1 if curr_c > curr_o else -1
+            return {"pattern": "momentum_candle", "direction": d, "strength": 0.65}
+
+    return {"pattern": None, "direction": 0, "strength": 0}
+
+
+def _detect_ema_squeeze(close: pd.Series, cfg: dict) -> dict:
+    """Detect EMA squeeze: Bollinger Bands inside Keltner Channels = volatility contraction.
+
+    Expansion after squeeze = high-probability directional breakout for scalping.
+    """
+    period = cfg.get("squeeze_period", 20)
+    if len(close) < period + 10:
+        return {"squeeze": False, "releasing": False, "direction": 0}
+
+    c = close.to_numpy(float)
+
+    # Bollinger Bands
+    sma = pd.Series(c).rolling(period).mean().to_numpy()
+    std = pd.Series(c).rolling(period).std().to_numpy()
+    bb_upper = sma + 2.0 * std
+    bb_lower = sma - 2.0 * std
+
+    # Keltner Channels (EMA +/- 1.5 * ATR)
+    ema_val = pd.Series(c).ewm(span=period, adjust=False).mean().to_numpy()
+    atr_approx = pd.Series(np.abs(np.diff(c, prepend=c[0]))).ewm(span=period, adjust=False).mean().to_numpy()
+    kc_upper = ema_val + 1.5 * atr_approx
+    kc_lower = ema_val - 1.5 * atr_approx
+
+    # Squeeze = BB inside KC
+    in_squeeze = bb_upper[-1] < kc_upper[-1] and bb_lower[-1] > kc_lower[-1]
+    prev_squeeze = bb_upper[-2] < kc_upper[-2] and bb_lower[-2] > kc_lower[-2]
+
+    # Releasing = was in squeeze, now breaking out
+    releasing = prev_squeeze and not in_squeeze
+
+    direction = 0
+    if releasing or in_squeeze:
+        # Momentum direction from linear regression of last few closes
+        lookback = min(6, len(c) - 1)
+        y = c[-lookback:]
+        x = np.arange(lookback, dtype=float)
+        slope = float(np.polyfit(x, y, 1)[0])
+        if abs(slope) > 0.0001:
+            direction = 1 if slope > 0 else -1
+
+    return {
+        "squeeze": bool(in_squeeze),
+        "releasing": bool(releasing),
+        "direction": direction,
+        "bb_width": float((bb_upper[-1] - bb_lower[-1]) / sma[-1] * 100) if sma[-1] > 0 else 0,
+    }
+
+
+def _session_scalp_boost(now_utc, cfg: dict) -> int:
+    """Session-aware scalping scoring boost.
+
+    Gold scalping windows (UTC):
+    - London Open:    07:00-10:00  (+1 scalp points)
+    - NY Open:       12:00-15:00  (+1 scalp points)
+    - London-NY Overlap: 12:00-16:00 (+2 scalp points - BEST)
+    - Asian session: 00:00-07:00  (avoid - low volatility)
+    """
+    scalp_cfg = cfg.get("scalper", {})
+    if not scalp_cfg.get("enabled", True):
+        return 0
+
+    h = now_utc.hour
+    m = now_utc.minute
+    t = h * 60 + m
+
+    # London-NY overlap = prime scalping
+    if 12 * 60 <= t < 16 * 60:
+        return 2
+    # London open
+    if 7 * 60 <= t < 10 * 60:
+        return 1
+    # NY open
+    if 13 * 30 <= t < 15 * 60:
+        return 1
+    # Late Asian = avoid
+    if 0 <= t < 5 * 60:
+        return -1
+    return 0
+
+
 def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None) -> dict:
     empty = {
         "signal": "NONE", "score": 0, "price": 0.0, "entry": 0.0,
@@ -247,6 +450,18 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
     sweep_level = sweep["level"]
     if sweep_level is not None and price_offset != 0:
         sweep_level += price_offset
+
+    candle_pattern = _detect_candlestick_patterns(df)
+    squeeze_info = _detect_ema_squeeze(close, cfg)
+    try:
+        ts = df.index[-1]
+        if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
+            from datetime import timezone as _tz
+            scalp_session = _session_scalp_boost(ts.astimezone(_tz.utc).replace(tzinfo=None), cfg)
+        else:
+            scalp_session = _session_scalp_boost(ts.to_pydatetime(), cfg)
+    except Exception:
+        scalp_session = 0
 
     buy_score = 0
     sell_score = 0
@@ -477,6 +692,51 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
             sell_factors += 1
             details["fvg"] = f"bearish FVG {fvg['nearest']['bottom']:.2f}-{fvg['nearest']['top']:.2f}"
 
+    # --- Scalper-specific scoring ---
+    if candle_pattern["pattern"]:
+        cp = candle_pattern
+        pts = max(1, int(round(cp["strength"] * 3)))
+        if cp["direction"] > 0:
+            buy_score += pts
+            buy_factors += 1
+        elif cp["direction"] < 0:
+            sell_score += pts
+            sell_factors += 1
+        details["candle_pattern"] = cp["pattern"]
+
+    if squeeze_info["releasing"]:
+        sq_pts = 2
+        if squeeze_info["direction"] > 0:
+            buy_score += sq_pts
+            buy_factors += 1
+        elif squeeze_info["direction"] < 0:
+            sell_score += sq_pts
+            sell_factors += 1
+        details["squeeze"] = "releasing"
+    elif squeeze_info["squeeze"]:
+        details["squeeze"] = "contracted"
+
+    if scalp_session > 0:
+        buy_score += scalp_session
+        sell_score += scalp_session
+        buy_factors += 1
+        sell_factors += 1
+        details["session"] = "prime_scalp" if scalp_session >= 2 else "good_scalp"
+    elif scalp_session < 0:
+        details["session"] = "low_vol_avoid"
+
+    if cfg.get("use_fib", True):
+        fib = _fib_ote(df, atr_val)
+        if fib and fib["in_ote"]:
+            details["fib"] = (f"OTE {fib['retrace'] * 100:.0f}% retrace of "
+                              f"{fib['level_low']:.2f}->{fib['level_high']:.2f} leg")
+            if fib["direction"] == "bull":
+                buy_score += 1
+                buy_factors += 1
+            else:
+                sell_score += 1
+                sell_factors += 1
+
     details["rsi"] = round(float(rsi_val), 2)
 
     threshold = cfg.get("signal_threshold", 2)
@@ -484,6 +744,15 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
     min_factors = cfg.get("min_confluence_factors", 2)
     sl_buffer = cfg.get("sl_atr_buffer", 1.0)
     rr = cfg.get("risk_reward", 2.0)
+
+    # Scalper overrides: tighter SL for higher win rate
+    scalp_cfg = cfg.get("scalper", {})
+    if scalp_cfg.get("enabled", True):
+        scalp_rr = scalp_cfg.get("scalp_rr", 1.5)
+        scalp_sl = scalp_cfg.get("scalp_sl_atr", 0.75)
+        if scalp_session >= 2 and candle_pattern["pattern"]:
+            rr = scalp_rr
+            sl_buffer = scalp_sl
 
     bias_label = {1: "bullish", -1: "bearish", 0: "flat"}.get(bias, "flat")
     details["bias"] = bias_label

@@ -91,7 +91,7 @@ def format_alert(pair: str, result: dict) -> str:
     details = result.get("details", {})
     signal = result.get("signal", "NONE")
 
-    emoji = "🟢" if "BUY" in signal else "🔴" if "SELL" in signal else "⚪"
+    emoji = "[BUY]" if "BUY" in signal else "[SELL]" if "SELL" in signal else "[-]"
     strength = "STRONG " if "STRONG" in signal else ""
     direction = "BUY" if "BUY" in signal else "SELL"
 
@@ -102,6 +102,9 @@ def format_alert(pair: str, result: dict) -> str:
         f"Stop Loss: {result['stop_loss']}",
         f"Take Profit: {result['take_profit']}",
     ]
+
+    if details.get("htf_direction"):
+        lines.append(f"Trend: {details['htf_direction']} on 4H/1H/45M/15M, entry on 5M")
 
     risk = abs(result["entry"] - result["stop_loss"])
     if risk > 0:
@@ -122,6 +125,8 @@ def format_alert(pair: str, result: dict) -> str:
         lines.append(f"OB: {details['order_block']}")
     if details.get("fvg"):
         lines.append(f"FVG: {details['fvg']}")
+    if details.get("fib"):
+        lines.append(f"Fib: {details['fib']}")
     if details.get("momentum"):
         lines.append(f"Momentum: {details['momentum']}")
     if details.get("volume"):
@@ -136,6 +141,12 @@ def format_alert(pair: str, result: dict) -> str:
         lines.append(f"Win Prob: {details['p_win'] * 100:.0f}%")
     if details.get("risk_suggested"):
         lines.append(f"Suggested Risk: {details['risk_suggested']}")
+    if details.get("mtf_high_confluence"):
+        lines.append("MTF Confluence: HIGH - all timeframes agree")
+    if details.get("mtf_summary"):
+        lines.append(f"MTF: {details['mtf_summary']}")
+    for ctx in details.get("context_lines", []):
+        lines.append(f"Context: {ctx}")
 
     if result.get("live_source"):
         lines.append(f"Source: {result['live_source']}")

@@ -10,6 +10,13 @@ def _path(pair: str, tf: str) -> str:
     return os.path.join(DATA_DIR, safe)
 
 
+def _coerce_utc_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee a tz-aware DatetimeIndex regardless of how the file parsed."""
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, utc=True)
+    return df
+
+
 def append_candles(pair: str, tf: str, df: pd.DataFrame) -> int:
     """Merge new candles into the local store; returns total rows stored."""
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -17,6 +24,7 @@ def append_candles(pair: str, tf: str, df: pd.DataFrame) -> int:
     if os.path.exists(path):
         try:
             old = pd.read_csv(path, index_col=0, parse_dates=True)
+            old = _coerce_utc_index(old)
             combined = pd.concat([old[~old.index.isin(df.index)], df]).sort_index()
         except Exception:
             combined = df
@@ -32,6 +40,7 @@ def load_candles(pair: str, tf: str) -> pd.DataFrame | None:
         return None
     try:
         df = pd.read_csv(path, index_col=0, parse_dates=True)
+        df = _coerce_utc_index(df)
         return df if df is not None and len(df) else None
     except Exception:
         return None
