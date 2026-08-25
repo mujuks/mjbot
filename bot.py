@@ -90,6 +90,63 @@ def build_watch_plan(result: dict, df, cfg: dict) -> list[str]:
     return lines
 
 
+def _watch_level_line(details: dict, signal: str, price: float) -> str:
+    """Build a one-line watch-level summary for WATCH_BUY / WATCH_SELL signals."""
+    if not signal.startswith("WATCH") or not price:
+        return ""
+    bull = "BUY" in signal
+    plan = details.get("watch_plan", [])
+    if not plan:
+        return ""
+    first = plan[0]
+    if "FVG" in first:
+        tag = "FVG"
+    elif "OB" in first:
+        tag = "OB"
+    elif "zone" in first.lower():
+        tag = "zone"
+    else:
+        tag = ""
+    paren = first.split("(")[1].rstrip(")") if "(" in first else ""
+    lo_hi = first.split(tag)[0].strip().rstrip("-– ").strip() if tag else ""
+    dist = ""
+    if paren and "pts" in paren:
+        dist = f" ({paren})"
+    label = "watching BUY at" if bull else "watching SELL at"
+    zone_text = f" | {label} {first.split('(')[0].strip()}" if tag else f" | {first}"
+    return zone_text
+
+
+def _format_watch_telegram(pair: str, result: dict, details: dict, signal: str) -> str:
+    """Build a short Telegram message for a WATCH signal with specific levels."""
+    bull = "BUY" in signal
+    price = float(result.get("price") or 0)
+    plan = details.get("watch_plan", [])
+    buy_s = details.get("buy_score", 0)
+    sell_s = details.get("sell_score", 0)
+    zone_line = plan[0] if plan else "no zone identified"
+    lo_hi_match = re.search(r"([\d.]+)-([\d.]+)", zone_line)
+    dist_text = ""
+    if lo_hi_match and price:
+        lo, hi = float(lo_hi_match.group(1)), float(lo_hi_match.group(2))
+        mid = (lo + hi) / 2
+        dist = mid - price
+        dist_text = f"  Mid {mid:.2f} ({dist:+.1f} pts from price)"
+
+    action = "BUY" if bull else "SELL"
+    emoji = "\U0001f441"  # eye emoji
+    lines = [
+        f"{emoji} WATCH_{action} {pair}",
+        f"  Watching for {action} at {zone_line.split('(')[0].strip()}",
+    ]
+    if dist_text:
+        lines.append(dist_text)
+    lines.append(f"  Score: {buy_s}/{sell_s} | Price: {price:.2f}")
+    if len(plan) > 1:
+        lines.append(f"  {plan[1]}")
+    return "\n".join(lines)
+
+
 def _best_zone(details: dict, bull: bool, price: float):
     """Closest SMC zone (demand/supply, OB, FVG) matching the trade direction."""
     cands = []
@@ -334,7 +391,13 @@ def format_digest(pair: str, result: dict, now_utc: datetime, cfg: dict) -> str:
     else:
         lines.append(f"  Buy: {details.get('buy_score', 0)} | Sell: {details.get('sell_score', 0)}")
     plan = result.get("details", {}).get("watch_plan")
-    if plan:
+    if plan and signal.startswith("WATCH"):
+        action = "BUY" if "BUY" in signal else "SELL"
+        first_zone = plan[0].split("(")[0].strip()
+        lines.append(f"  Watch: {action} at {first_zone}")
+        for lvl in plan[:2]:
+            lines.append(f"    - {lvl}")
+    elif plan:
         lines.append(f"  Levels: {'; '.join(plan[:2])}")
     try:
         nl = next_event_line(cfg)
@@ -484,28 +547,6 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
             except Exception as ce:
                 print(f"[{pair}] macro context error: {ce}", file=sys.stderr)
 
-            qcfg = cfg.get("quant", {})
-            if qcfg.get("enabled", True):
-                try:
-                    assess = assess_signal(pair, df, result, cfg)
-                except Exception as qe:
-                    print(f"[{pair}] quant error: {qe}", file=sys.stderr)
-                    assess = None
-                if assess:
-                    p_win = assess.get("p_win")
-                    if p_win is not None and signal in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
-                        details["p_win"] = round(p_win, 3)
-                        risk_pct = suggested_risk_pct(p_win, cfg)
-                        if risk_pct is not None:
-                            details["risk_suggested"] = f"{risk_pct}%"
-                        min_p = float(qcfg.get("min_probability", 0.55))
-                        if p_win < min_p:
-                            details["gated_from"] = signal
-                            signal = "WATCH_BUY" if "BUY" in signal else "WATCH_SELL"
-                            result["signal"] = signal
-                    elif p_win is None and assess.get("error"):
-                        print(f"[{pair}] quant: {assess['error']}", file=sys.stderr)
-
             mtf = None
             try:
                 mtf = mtf_assess(pair, cfg, entry_result=result)
@@ -528,6 +569,30 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
                 if mtf.get("high_confluence") and not mtf["veto"]:
                     details["mtf_high_confluence"] = True
 
+            qcfg = cfg.get("quant", {})
+            if qcfg.get("enabled", True):
+                try:
+                    assess = assess_signal(pair, df, result, cfg)
+                except Exception as qe:
+                    print(f"[{pair}] quant error: {qe}", file=sys.stderr)
+                    assess = None
+                if assess:
+                    p_win = assess.get("p_win")
+                    if p_win is not None and signal in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
+                        details["p_win"] = round(p_win, 3)
+                        risk_pct = suggested_risk_pct(p_win, cfg)
+                        if risk_pct is not None:
+                            details["risk_suggested"] = f"{risk_pct}%"
+                        min_p = float(qcfg.get("min_probability", 0.55))
+                        if details.get("mtf_high_confluence"):
+                            min_p = max(min_p - 0.05, 0.35)
+                        if p_win < min_p:
+                            details["gated_from"] = signal
+                            signal = "WATCH_BUY" if "BUY" in signal else "WATCH_SELL"
+                            result["signal"] = signal
+                    elif p_win is None and assess.get("error"):
+                        print(f"[{pair}] quant: {assess['error']}", file=sys.stderr)
+
             try:
                 held, nev = blackout_check(cfg, now_utc)
             except Exception as ne:
@@ -538,6 +603,37 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
                 details["gated_from"] = details.get("gated_from") or signal
                 signal = "WATCH_BUY" if "BUY" in signal else "WATCH_SELL"
                 result["signal"] = signal
+
+            if signal.startswith("WATCH") and mtf:
+                htf_comp = _htf_direction(mtf)
+                htf_bullish = htf_comp > 0.20
+                htf_bearish = htf_comp < -0.20
+                pd_zone = details.get("pd_zone", "")
+                if signal == "WATCH_SELL" and htf_bullish and pd_zone in ("deep_discount", "discount"):
+                    details["zone_htf_block"] = "WATCH_SELL blocked: bullish HTF in discount zone"
+                    signal = "NONE"
+                    result["signal"] = signal
+                elif signal == "WATCH_BUY" and htf_bearish and pd_zone in ("deep_premium", "premium"):
+                    details["zone_htf_block"] = "WATCH_BUY blocked: bearish HTF in premium zone"
+                    signal = "NONE"
+                    result["signal"] = signal
+
+            if signal.startswith("WATCH") and mtf:
+                htf_comp = _htf_direction(mtf)
+                pd_zone = details.get("pd_zone", "")
+                sig_dir = 1 if "BUY" in signal else -1
+                htf_aligned = (htf_comp > 0.20 and sig_dir > 0) or (htf_comp < -0.20 and sig_dir < 0)
+                zone_match = (sig_dir > 0 and pd_zone in ("deep_discount", "discount")) or \
+                             (sig_dir < 0 and pd_zone in ("deep_premium", "premium"))
+                if htf_aligned and zone_match:
+                    if sig_dir > 0:
+                        details["buy_score"] = details.get("buy_score", 0) + 1
+                    else:
+                        details["sell_score"] = details.get("sell_score", 0) + 1
+                    details["zone_htf_boost"] = True
+
+            buy_score = details.get("buy_score", 0)
+            sell_score = details.get("sell_score", 0)
 
             try:
                 plan = build_watch_plan(result, df, cfg)
@@ -652,7 +748,15 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
                 htf_txt = details.get("mtf_summary", "HTF warming up")
                 lean = f" | leaning {dom} ({max(buy_score, sell_score)}/{threshold})" if dom else ""
                 sess = next((c for c in details.get("context_lines", []) if c.startswith("Session")), "")
-                print(f"[{pair}] standby | {htf_txt}{lean}" + (f" | {sess}" if sess else ""))
+                watch_lvl = _watch_level_line(details, signal, float(result.get("price") or 0))
+                print(f"[{pair}] {signal} | {htf_txt}{watch_lvl}{lean}" + (f" | {sess}" if sess else ""))
+
+                if cfg.get("send_watch_alerts", False) and signal.startswith("WATCH") and watch_lvl:
+                    try:
+                        wmsg = _format_watch_telegram(pair, result, details, signal)
+                        send_telegram(cfg, wmsg)
+                    except Exception as we:
+                        print(f"[{pair}] watch alert error: {we}", file=sys.stderr)
 
         except Exception as e:
             print(f"[{pair}] Error: {e}", file=sys.stderr)

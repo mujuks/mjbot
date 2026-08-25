@@ -16,7 +16,7 @@ _NETWORK_ERRORS = (
 try:
     import websockets.exceptions
     _NETWORK_ERRORS = _NETWORK_ERRORS + (
-        websockets.exceptions.WebsocketException,
+        websockets.exceptions.WebSocketException,
     )
 except ImportError:
     pass
