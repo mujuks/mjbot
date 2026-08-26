@@ -200,26 +200,43 @@ def detect_fvg(df: pd.DataFrame, cfg: dict) -> dict:
     lookback = cfg.get("fvg_lookback", 50)
     start = max(2, n - lookback)
 
+    from zones import _atr
+    atr_vals = _atr(df, cfg.get("atr_period", 14)).values
+
     bullish_fvgs = []
     bearish_fvgs = []
 
     for i in range(start, n - 1):
         if lows[i + 1] > highs[i - 1]:
             gap = lows[i + 1] - highs[i - 1]
+            atr_ref = atr_vals[i] if atr_vals[i] > 0 else 1.0
+            size_class = _classify_fvg_size(gap, atr_ref, cfg)
+            mid = (lows[i + 1] + highs[i - 1]) / 2
+            entry_price = _fvg_entry_price(size_class, mid, lows[i + 1], highs[i - 1])
             bullish_fvgs.append({
                 "top": float(lows[i + 1]),
                 "bottom": float(highs[i - 1]),
+                "mid": float(mid),
                 "size": float(gap),
+                "size_class": size_class,
+                "entry_price": float(entry_price),
                 "index": i,
                 "mitigated": closes[i + 1] <= highs[i - 1] if i + 1 < n else False,
             })
 
         if highs[i + 1] < lows[i - 1]:
             gap = lows[i - 1] - highs[i + 1]
+            atr_ref = atr_vals[i] if atr_vals[i] > 0 else 1.0
+            size_class = _classify_fvg_size(gap, atr_ref, cfg)
+            mid = (lows[i - 1] + highs[i + 1]) / 2
+            entry_price = _fvg_entry_price(size_class, mid, lows[i - 1], highs[i + 1])
             bearish_fvgs.append({
                 "top": float(lows[i - 1]),
                 "bottom": float(highs[i + 1]),
+                "mid": float(mid),
                 "size": float(gap),
+                "size_class": size_class,
+                "entry_price": float(entry_price),
                 "index": i,
                 "mitigated": closes[i + 1] >= lows[i - 1] if i + 1 < n else False,
             })
@@ -231,13 +248,13 @@ def detect_fvg(df: pd.DataFrame, cfg: dict) -> dict:
 
     nearest = None
     for fvg in reversed(bullish_fvgs):
-        if not fvg["mitigated"] and abs(last_price - (fvg["top"] + fvg["bottom"]) / 2) < 3 * atr:
+        if not fvg["mitigated"] and abs(last_price - fvg["mid"]) < 3 * atr:
             nearest = {**fvg, "direction": "bullish"}
             break
 
     if nearest is None:
         for fvg in reversed(bearish_fvgs):
-            if not fvg["mitigated"] and abs(last_price - (fvg["top"] + fvg["bottom"]) / 2) < 3 * atr:
+            if not fvg["mitigated"] and abs(last_price - fvg["mid"]) < 3 * atr:
                 nearest = {**fvg, "direction": "bearish"}
                 break
 
@@ -247,4 +264,246 @@ def detect_fvg(df: pd.DataFrame, cfg: dict) -> dict:
         "nearest": nearest,
         "bullish_count": sum(1 for f in bullish_fvgs if not f["mitigated"]),
         "bearish_count": sum(1 for f in bearish_fvgs if not f["mitigated"]),
+    }
+
+
+def _classify_fvg_size(gap: float, atr: float, cfg: dict) -> str:
+    big_threshold = cfg.get("fvg_big_atr", 1.5)
+    small_threshold = cfg.get("fvg_small_atr", 0.3)
+    ratio = gap / atr if atr > 0 else 0
+    if ratio >= big_threshold:
+        return "big"
+    elif ratio <= small_threshold:
+        return "small"
+    return "medium"
+
+
+def _fvg_entry_price(size_class: str, mid: float, top: float, bottom: float) -> float:
+    if size_class == "big":
+        return mid
+    return bottom
+
+
+def detect_liquidity_voids(df: pd.DataFrame, cfg: dict) -> dict:
+    """
+    Detect liquidity voids — rapid one-sided moves that leave order flow gaps.
+    A void is a sequence of 3+ consecutive same-direction candles with
+    minimal retracement, creating an imbalance zone.
+
+    Bullish void: rapid upward move leaving unfilled orders below.
+    Bearish void: rapid downward move leaving unfilled orders above.
+    """
+    if df is None or df.empty or len(df) < 5:
+        return {"bullish_voids": [], "bearish_voids": [], "nearest": None}
+
+    highs = df["High"].values
+    lows = df["Low"].values
+    opens = df["Open"].values
+    closes = df["Close"].values
+    n = len(df)
+
+    from zones import _atr
+    atr_vals = _atr(df, cfg.get("atr_period", 14)).values
+
+    lookback = cfg.get("void_lookback", 60)
+    start = max(3, n - lookback)
+    min_candles = cfg.get("void_min_candles", 3)
+    max_retrace_pct = cfg.get("void_max_retrace_pct", 0.3)
+
+    bullish_voids = []
+    bearish_voids = []
+
+    for i in range(start, n - min_candles):
+        bull_count = 0
+        bear_count = 0
+        for j in range(i, min(i + min_candles + 3, n)):
+            if closes[j] > opens[j]:
+                bull_count += 1
+            elif closes[j] < opens[j]:
+                bear_count += 1
+
+        if bull_count >= min_candles:
+            move_high = max(highs[i:min(i + min_candles + 2, n)])
+            move_low = min(lows[i:min(i + min_candles + 2, n)])
+            move_size = move_high - move_low
+            retrace = 0
+            for j in range(i + min_candles, min(i + min_candles + 3, n)):
+                retrace = max(retrace, move_high - lows[j])
+
+            atr_ref = atr_vals[i] if i < len(atr_vals) and atr_vals[i] > 0 else 1.0
+            if move_size > atr_ref * 1.5:
+                retrace_ok = retrace <= move_size * max_retrace_pct if move_size > 0 else True
+                if retrace_ok:
+                    bullish_voids.append({
+                        "index": i,
+                        "top": float(move_high),
+                        "bottom": float(move_low),
+                        "mid": float((move_high + move_low) / 2),
+                        "size": float(move_size),
+                        "candles": bull_count,
+                        "strength": min(1.0, move_size / (2.0 * atr_ref)),
+                        "mitigated": False,
+                    })
+
+        if bear_count >= min_candles:
+            move_high = max(highs[i:min(i + min_candles + 2, n)])
+            move_low = min(lows[i:min(i + min_candles + 2, n)])
+            move_size = move_high - move_low
+            retrace = 0
+            for j in range(i + min_candles, min(i + min_candles + 3, n)):
+                retrace = max(retrace, highs[j] - move_low)
+
+            atr_ref = atr_vals[i] if i < len(atr_vals) and atr_vals[i] > 0 else 1.0
+            if move_size > atr_ref * 1.5:
+                retrace_ok = retrace <= move_size * max_retrace_pct if move_size > 0 else True
+                if retrace_ok:
+                    bearish_voids.append({
+                        "index": i,
+                        "top": float(move_high),
+                        "bottom": float(move_low),
+                        "mid": float((move_high + move_low) / 2),
+                        "size": float(move_size),
+                        "candles": bear_count,
+                        "strength": min(1.0, move_size / (2.0 * atr_ref)),
+                        "mitigated": False,
+                    })
+
+    for v in bullish_voids:
+        for j in range(v["index"] + min_candles, n):
+            if closes[j] < v["bottom"]:
+                v["mitigated"] = True
+                break
+
+    for v in bearish_voids:
+        for j in range(v["index"] + min_candles, n):
+            if closes[j] > v["top"]:
+                v["mitigated"] = True
+                break
+
+    bullish_voids.sort(key=lambda z: z["index"], reverse=True)
+    bearish_voids.sort(key=lambda z: z["index"], reverse=True)
+
+    last_price = closes[-1]
+    atr_val = atr_vals[-1] if len(atr_vals) > 0 and atr_vals[-1] > 0 else 1.0
+    nearest = None
+    for v in reversed(bullish_voids):
+        if not v["mitigated"] and abs(last_price - v["mid"]) < 3 * atr_val:
+            nearest = {**v, "direction": "bullish"}
+            break
+    if nearest is None:
+        for v in reversed(bearish_voids):
+            if not v["mitigated"] and abs(last_price - v["mid"]) < 3 * atr_val:
+                nearest = {**v, "direction": "bearish"}
+                break
+
+    return {
+        "bullish_voids": bullish_voids,
+        "bearish_voids": bearish_voids,
+        "nearest": nearest,
+        "bullish_count": sum(1 for v in bullish_voids if not v["mitigated"]),
+        "bearish_count": sum(1 for v in bearish_voids if not v["mitigated"]),
+    }
+
+
+def detect_volume_profile(df: pd.DataFrame, cfg: dict) -> dict:
+    """
+    Detect volume profile — Point of Control (POC) and Value Area (VA).
+
+    The POC is the price level with the highest traded volume. It acts as a
+    magnet for price and a key institutional reference point.
+
+    Value Area (VA) contains ~70% of traded volume (1 standard deviation).
+    Prices above VA = premium, below VA = discount.
+
+    Returns POC, VA high/low, and whether price is near POC.
+    """
+    if df is None or df.empty or len(df) < 20:
+        return {"poc": None, "va_high": None, "va_low": None, "near_poc": False, "score": 0}
+
+    cfg_vp = cfg.get("volume_profile", {})
+    if not cfg_vp.get("enabled", True):
+        return {"poc": None, "va_high": None, "va_low": None, "near_poc": False, "score": 0}
+
+    lookback = cfg_vp.get("lookback", 100)
+    n = len(df)
+    start = max(0, n - lookback)
+
+    highs = df["High"].iloc[start:].values
+    lows = df["Low"].iloc[start:].values
+    closes = df["Close"].iloc[start:].values
+    volumes = df["Volume"].iloc[start:].values
+
+    if np.sum(volumes) <= 0:
+        return {"poc": None, "va_high": None, "va_low": None, "near_poc": False, "score": 0}
+
+    # Create price bins
+    price_min = float(np.min(lows))
+    price_max = float(np.max(highs))
+    if price_max <= price_min:
+        return {"poc": None, "va_high": None, "va_low": None, "near_poc": False, "score": 0}
+
+    num_bins = cfg_vp.get("bins", 50)
+    bin_edges = np.linspace(price_min, price_max, num_bins + 1)
+    bin_mids = (bin_edges[:-1] + bin_edges[1:]) / 2
+    bin_volume = np.zeros(num_bins)
+
+    # Distribute volume into price bins
+    for i in range(len(closes)):
+        typical = (highs[i] + lows[i] + closes[i]) / 3.0
+        bin_idx = int((typical - price_min) / (price_max - price_min) * (num_bins - 1))
+        bin_idx = max(0, min(num_bins - 1, bin_idx))
+        bin_volume[bin_idx] += volumes[i]
+
+    # POC = bin with highest volume
+    poc_idx = int(np.argmax(bin_volume))
+    poc = float(bin_mids[poc_idx])
+
+    # Value Area: expand from POC until ~70% of volume is included
+    total_vol = np.sum(bin_volume)
+    va_target = total_vol * 0.70
+    accumulated = bin_volume[poc_idx]
+    va_low_idx = poc_idx
+    va_high_idx = poc_idx
+
+    while accumulated < va_target and (va_low_idx > 0 or va_high_idx < num_bins - 1):
+        expand_up = bin_volume[va_high_idx + 1] if va_high_idx < num_bins - 1 else 0
+        expand_down = bin_volume[va_low_idx - 1] if va_low_idx > 0 else 0
+
+        if expand_up >= expand_down and va_high_idx < num_bins - 1:
+            va_high_idx += 1
+            accumulated += bin_volume[va_high_idx]
+        elif va_low_idx > 0:
+            va_low_idx -= 1
+            accumulated += bin_volume[va_low_idx]
+        else:
+            break
+
+    va_high = float(bin_mids[va_high_idx])
+    va_low = float(bin_mids[va_low_idx])
+
+    # Check if current price is near POC
+    last_price = float(closes[-1])
+    atr_ref = float(np.mean(np.abs(np.diff(closes, prepend=closes[0]))[-14:]))
+    if atr_ref <= 0:
+        atr_ref = 1.0
+    near_poc = abs(last_price - poc) < cfg_vp.get("near_poc_atr", 0.5) * atr_ref
+
+    # Score: near POC = momentum stall zone (neutral), near VA edges = reversal zone
+    score = 0
+    if near_poc:
+        score = 0  # POC is a magnet, not directional
+    elif last_price > va_high:
+        score = 1  # In premium, possible reversal down
+    elif last_price < va_low:
+        score = 1  # In discount, possible reversal up
+
+    return {
+        "poc": round(poc, 2),
+        "va_high": round(va_high, 2),
+        "va_low": round(va_low, 2),
+        "near_poc": near_poc,
+        "in_premium": last_price > va_high,
+        "in_discount": last_price < va_low,
+        "volume_at_poc": float(bin_volume[poc_idx]),
+        "score": score,
     }

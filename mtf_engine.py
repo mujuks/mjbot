@@ -21,11 +21,12 @@ log = logging.getLogger("mtf")
 
 # (timeframe, weight, cache TTL seconds); 5m is served live by the bot loop.
 TIMEFRAMES = [
-    ("4h", 0.30, 3600),
-    ("1h", 0.26, 1200),
-    ("45m", 0.24, 900),
-    ("15m", 0.20, 600),
-    ("5m", 0.18, 0),
+    ("4h", 0.25, 3600),
+    ("1h", 0.22, 1200),
+    ("45m", 0.18, 900),
+    ("30m", 0.12, 600),
+    ("15m", 0.15, 300),
+    ("5m", 0.08, 0),
 ]
 
 _ENTRY_TF = "5m"

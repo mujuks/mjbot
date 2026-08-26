@@ -115,16 +115,54 @@ def format_alert(pair: str, result: dict) -> str:
         lines.append(f"Structure: {details['structure']}")
     if details.get("structure_event"):
         lines.append(f"Event: {details['structure_event']}")
+    if details.get("choch_key_level"):
+        lines.append(f"CHoCH Key Level: {details['choch_key_level']}")
     if details.get("pd_zone"):
         lines.append(f"Zone: {details['pd_zone']}")
+    if details.get("pd_array"):
+        lines.append(f"PD-Array: {details['pd_array']}")
     if details.get("zone"):
         lines.append(f"S/D: {details['zone']}")
+    if details.get("mitigation_block"):
+        lines.append(f"Mitigation: {details['mitigation_block']}")
+    if details.get("breaker_block"):
+        lines.append(f"Breaker: {details['breaker_block']}")
+    if details.get("rejection_block"):
+        lines.append(f"Rejection: {details['rejection_block']}")
     if details.get("sweep"):
         lines.append(f"Sweep: {details['sweep']}")
     if details.get("order_block"):
         lines.append(f"OB: {details['order_block']}")
+    if details.get("ob_imbalance"):
+        lines.append(f"Imbalance: {details['ob_imbalance']}")
+    if details.get("unicorn"):
+        lines.append(f"UNICORN: {details['unicorn']}")
+    if details.get("bpr"):
+        lines.append(f"BPR: {details['bpr']}")
+    if details.get("ob_fvg"):
+        lines.append(f"OB+FVG: {details['ob_fvg']}")
     if details.get("fvg"):
         lines.append(f"FVG: {details['fvg']}")
+    if details.get("fvg_size"):
+        lines.append(f"FVG Size: {details['fvg_size']}")
+    if details.get("volume_profile"):
+        lines.append(f"VP: {details['volume_profile']}")
+    if details.get("vp_position"):
+        lines.append(f"VP Position: {details['vp_position']}")
+    if details.get("retracement"):
+        lines.append(f"Retracement: {details['retracement']}")
+    if details.get("session_timing"):
+        lines.append(f"Session: {details['session_timing']}")
+    if details.get("killzone"):
+        lines.append(f"Killzone: {details['killzone']}")
+    if details.get("asian_range"):
+        lines.append(f"Asian Range: {details['asian_range']}")
+    if details.get("judas_swing"):
+        lines.append(f"Judas Swing: {details['judas_swing']}")
+    if details.get("silver_bullet"):
+        lines.append(f"Silver Bullet: {details['silver_bullet']}")
+    if details.get("displacement_quality"):
+        lines.append(f"Displacement: {details['displacement_quality']}")
     if details.get("fib"):
         lines.append(f"Fib: {details['fib']}")
     if details.get("momentum"):

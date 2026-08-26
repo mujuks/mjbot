@@ -117,6 +117,10 @@ def detect_order_blocks(df: pd.DataFrame, cfg: dict) -> dict:
     bullish_obs.sort(key=lambda z: z["index"], reverse=True)
     bearish_obs.sort(key=lambda z: z["index"], reverse=True)
 
+    _check_imbalance(bullish_obs, highs, lows, n, bullish=True)
+    _check_imbalance(bearish_obs, highs, lows, n, bullish=False)
+    _check_preceding_sweep(bullish_obs, bearish_obs, highs, lows, closes, n, cfg)
+
     return {"bullish": bullish_obs, "bearish": bearish_obs}
 
 
@@ -179,3 +183,87 @@ def _mark_mitigated(obs: list, closes: np.ndarray, n: int, direction: str):
                 mitigated = True
                 break
         ob["mitigated"] = mitigated
+
+
+def _check_imbalance(obs: list, highs: np.ndarray, lows: np.ndarray, n: int, bullish: bool):
+    """
+    Check if there's an FVG (imbalance) within the displacement leg of each OB.
+    An OB with imbalance in its displacement leg is stronger — it means the move
+    away from the OB was aggressive enough to leave unfilled orders.
+    """
+    for ob in obs:
+        idx = ob["index"]
+        has_imbalance = False
+        for k in range(idx + 1, min(idx + 5, n - 2)):
+            if bullish:
+                if lows[k + 1] > highs[k - 1]:
+                    gap = lows[k + 1] - highs[k - 1]
+                    if gap > 0:
+                        has_imbalance = True
+                        break
+            else:
+                if highs[k + 1] < lows[k - 1]:
+                    gap = lows[k - 1] - highs[k + 1]
+                    if gap > 0:
+                        has_imbalance = True
+                        break
+        ob["has_imbalance"] = has_imbalance
+
+
+def _check_preceding_sweep(bullish_obs: list, bearish_obs: list,
+                           highs: np.ndarray, lows: np.ndarray,
+                           closes: np.ndarray, n: int, cfg: dict):
+    """
+    Check if a liquidity sweep occurred before each OB formed.
+
+    Institutional logic:
+    - Bullish OB: price swept below a swing low (trapping sellers) before the
+      bullish OB candle. Smart money absorbed the sell stops.
+    - Bearish OB: price swept above a swing high (trapping buyers) before the
+      bearish OB candle. Smart money absorbed the buy stops.
+
+    An OB with a preceding sweep is significantly more likely to be institutional.
+    """
+    lookback = cfg.get("ob_sweep_lookback", 10)
+    left = cfg.get("swing_left", 3)
+
+    # Find swing points
+    pivot_highs = []
+    pivot_lows = []
+    for i in range(left, n - left):
+        wh = highs[i - left:i + left + 1]
+        wl = lows[i - left:i + left + 1]
+        if highs[i] == np.max(wh) and np.sum(wh == highs[i]) == 1:
+            pivot_highs.append((i, highs[i]))
+        if lows[i] == np.min(wl) and np.sum(wl == lows[i]) == 1:
+            pivot_lows.append((i, lows[i]))
+
+    for ob in bullish_obs:
+        idx = ob["index"]
+        sweep_found = False
+        # Check if price swept below any swing low in the candles before this OB
+        start = max(0, idx - lookback)
+        for pi, pl in pivot_lows:
+            if pi < idx and pi >= start:
+                # Check if price dipped below the swing low before recovering
+                for j in range(pi + 1, idx):
+                    if lows[j] < pl and closes[j] > pl:
+                        sweep_found = True
+                        break
+            if sweep_found:
+                break
+        ob["preceding_sweep"] = sweep_found
+
+    for ob in bearish_obs:
+        idx = ob["index"]
+        sweep_found = False
+        start = max(0, idx - lookback)
+        for pi, ph in pivot_highs:
+            if pi < idx and pi >= start:
+                for j in range(pi + 1, idx):
+                    if highs[j] > ph and closes[j] < ph:
+                        sweep_found = True
+                        break
+            if sweep_found:
+                break
+        ob["preceding_sweep"] = sweep_found

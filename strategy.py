@@ -2,10 +2,15 @@ import numpy as np
 import pandas as pd
 
 from liquidity import (detect_liquidity_sweep, detect_liquidity_pools,
-                       compute_dynamic_tp, detect_fvg)
+                       compute_dynamic_tp, detect_fvg, detect_liquidity_voids,
+                       detect_volume_profile)
 from market_structure import analyze_structure, compute_premium_discount
 from order_blocks import detect_order_blocks, find_nearest_ob
 from zones import detect_zones, _atr
+from mitigation_blocks import detect_mitigation_blocks, find_nearest_mitigation
+from breaker_blocks import detect_breaker_blocks, find_nearest_breaker
+from rejection_blocks import detect_rejection_blocks, find_nearest_rejection
+from session_timing import session_timing_score, validate_displacement
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
@@ -402,6 +407,346 @@ def _session_scalp_boost(now_utc, cfg: dict) -> int:
     return 0
 
 
+def _validate_retracement(df: pd.DataFrame, cfg: dict) -> dict:
+    """
+    Validate retracement using 3-candle closing rule.
+    A valid bullish retracement: 3 consecutive candles closing higher (pullback to demand).
+    A valid bearish retracement: 3 consecutive candles closing lower (pullback to supply).
+    Returns whether retracement is valid and its direction.
+    """
+    if df is None or df.empty or len(df) < 4:
+        return {"valid": False, "direction": "none"}
+
+    c = df["Close"].values[-4:]
+    o = df["Open"].values[-4:]
+
+    bull_closes = sum(1 for i in range(1, len(c)) if c[i] > c[i - 1])
+    bear_closes = sum(1 for i in range(1, len(c)) if c[i] < c[i - 1])
+
+    min_candles = cfg.get("retracement_min_candles", 3)
+    bull_retrace = bull_closes >= min_candles - 1
+    bear_retrace = bear_closes >= min_candles - 1
+
+    return {
+        "valid": bull_retrace or bear_retrace,
+        "bullish": bull_retrace,
+        "bearish": bear_retrace,
+        "bull_closes": bull_closes,
+        "bear_closes": bear_closes,
+    }
+
+
+def _detect_confluence_setups(fvg: dict, obs: dict, mitigation: dict,
+                               breaker: dict, price: float, atr_val: float,
+                               cfg: dict) -> dict:
+    """
+    Detect high-probability confluence setups:
+    1. Unicorn: Breaker/Mitigation block + FVG overlap at same level
+    2. BPR (Balanced Price Range): Two overlapping FVGs creating equilibrium
+    3. OB+FVG: Order Block spatially aligned with FVG
+
+    These setups are among the strongest in SMC because they show
+    institutional confluence at a specific price level.
+    """
+    setups = []
+    overlap_tolerance = cfg.get("confluence_overlap_atr", 0.5) * atr_val
+
+    for direction in ["bullish", "bearish"]:
+        fvgs = fvg.get(f"{direction}_fvgs", [])
+        uns_mitigated = [f for f in fvgs if not f.get("mitigated", False)]
+
+        for fvg_item in uns_mitigated:
+            fvg_top = fvg_item["top"]
+            fvg_bottom = fvg_item["bottom"]
+            fvg_mid = (fvg_top + fvg_bottom) / 2
+
+            if direction == "bullish":
+                for mb in mitigation.get("bullish", []):
+                    if _zones_overlap(fvg_bottom, fvg_top, mb["bottom"], mb["top"], overlap_tolerance):
+                        setups.append({
+                            "type": "unicorn",
+                            "direction": "bullish",
+                            "price_level": fvg_mid,
+                            "fvg": fvg_item,
+                            "block": mb,
+                            "strength": 1.0,
+                        })
+
+                for bb in breaker.get("bullish", []):
+                    if _zones_overlap(fvg_bottom, fvg_top, bb["bottom"], bb["top"], overlap_tolerance):
+                        setups.append({
+                            "type": "unicorn",
+                            "direction": "bullish",
+                            "price_level": fvg_mid,
+                            "fvg": fvg_item,
+                            "block": bb,
+                            "strength": 0.9,
+                        })
+
+            else:
+                for mb in mitigation.get("bearish", []):
+                    if _zones_overlap(fvg_bottom, fvg_top, mb["bottom"], mb["top"], overlap_tolerance):
+                        setups.append({
+                            "type": "unicorn",
+                            "direction": "bearish",
+                            "price_level": fvg_mid,
+                            "fvg": fvg_item,
+                            "block": mb,
+                            "strength": 1.0,
+                        })
+
+                for bb in breaker.get("bearish", []):
+                    if _zones_overlap(fvg_bottom, fvg_top, bb["bottom"], bb["top"], overlap_tolerance):
+                        setups.append({
+                            "type": "unicorn",
+                            "direction": "bearish",
+                            "price_level": fvg_mid,
+                            "fvg": fvg_item,
+                            "block": bb,
+                            "strength": 0.9,
+                        })
+
+    bull_unmitigated = [f for f in fvg.get("bullish_fvgs", []) if not f.get("mitigated", False)]
+    bear_unmitigated = [f for f in fvg.get("bearish_fvgs", []) if not f.get("mitigated", False)]
+
+    for bf in bull_unmitigated:
+        for br in bear_unmitigated:
+            if _zones_overlap(bf["bottom"], bf["top"], br["bottom"], br["top"], overlap_tolerance):
+                setups.append({
+                    "type": "bpr",
+                    "direction": "neutral",
+                    "price_level": (bf["mid"] + br["mid"]) / 2,
+                    "fvg_bull": bf,
+                    "fvg_bear": br,
+                    "strength": 0.8,
+                })
+
+    for direction in ["bullish", "bearish"]:
+        fvgs = fvg.get(f"{direction}_fvgs", [])
+        uns = [f for f in fvgs if not f.get("mitigated", False)]
+
+        for fvg_item in uns:
+            fvg_top = fvg_item["top"]
+            fvg_bottom = fvg_item["bottom"]
+
+            if direction == "bullish":
+                for ob in obs.get("bullish", []):
+                    if not ob.get("mitigated", False):
+                        if _zones_overlap(fvg_bottom, fvg_top, ob["bottom"], ob["top"], overlap_tolerance):
+                            setups.append({
+                                "type": "ob_fvg",
+                                "direction": "bullish",
+                                "price_level": fvg_item["mid"],
+                                "fvg": fvg_item,
+                                "ob": ob,
+                                "strength": 0.7,
+                            })
+            else:
+                for ob in obs.get("bearish", []):
+                    if not ob.get("mitigated", False):
+                        if _zones_overlap(fvg_bottom, fvg_top, ob["bottom"], ob["top"], overlap_tolerance):
+                            setups.append({
+                                "type": "ob_fvg",
+                                "direction": "bearish",
+                                "price_level": fvg_item["mid"],
+                                "fvg": fvg_item,
+                                "ob": ob,
+                                "strength": 0.7,
+                            })
+
+    return {"setups": setups, "unicorn_count": sum(1 for s in setups if s["type"] == "unicorn"),
+            "bpr_count": sum(1 for s in setups if s["type"] == "bpr"),
+            "ob_fvg_count": sum(1 for s in setups if s["type"] == "ob_fvg")}
+
+
+def _zones_overlap(bottom1: float, top1: float, bottom2: float, top2: float, tolerance: float = 0) -> bool:
+    return bottom1 <= top2 + tolerance and bottom2 <= top1 + tolerance
+
+
+def _choch_in_key_level(structure: dict, zones: dict, obs: dict, price: float, atr_val: float) -> dict:
+    """
+    Check if a CHoCH event happened inside an HTF key level (supply/demand zone or OB).
+    This is one of the strongest confluences in SMC — a lower timeframe structure
+    shift happening inside a higher timeframe point of interest.
+
+    Returns whether CHoCH is inside a key level and which level.
+    """
+    event = structure.get("event")
+    choch_level = structure.get("choch_level")
+
+    if event is None or choch_level is None:
+        return {"inside_key_level": False, "level_type": None, "level_price": None}
+
+    for zone in zones.get("demand", []):
+        if zone.get("mitigated", False):
+            continue
+        if zone["bottom"] <= choch_level <= zone["top"]:
+            return {"inside_key_level": True, "level_type": "demand",
+                    "level_price": (zone["bottom"] + zone["top"]) / 2}
+
+    for zone in zones.get("supply", []):
+        if zone.get("mitigated", False):
+            continue
+        if zone["bottom"] <= choch_level <= zone["top"]:
+            return {"inside_key_level": True, "level_type": "supply",
+                    "level_price": (zone["bottom"] + zone["top"]) / 2}
+
+    for ob in obs.get("bullish", []):
+        if not ob.get("mitigated", False):
+            if ob["bottom"] <= choch_level <= ob["top"]:
+                return {"inside_key_level": True, "level_type": "bullish_ob",
+                        "level_price": (ob["bottom"] + ob["top"]) / 2}
+
+    for ob in obs.get("bearish", []):
+        if not ob.get("mitigated", False):
+            if ob["bottom"] <= choch_level <= ob["top"]:
+                return {"inside_key_level": True, "level_type": "bearish_ob",
+                        "level_price": (ob["bottom"] + ob["top"]) / 2}
+
+    return {"inside_key_level": False, "level_type": None, "level_price": None}
+
+
+def _pd_array_priority_scoring(price: float, atr_val: float, cfg: dict,
+                                mitigation: dict, breaker: dict, fvg: dict,
+                                obs: dict, rejection: dict, zones_data: dict,
+                                sweeps: dict, structure: dict) -> dict:
+    """
+    PD-Array priority scoring. Instead of summing all scores flatly,
+    check reference points in priority order:
+    1. Mitigation Block (highest priority)
+    2. Breaker Block
+    3. Liquidity Void
+    4. FVG
+    5. Order Block
+    6. Old High/Low (swing points)
+    7. Rejection Block (lowest priority)
+
+    The highest-priority zone that price is near determines the primary
+    entry logic. Additional zones at the same level add confluence.
+    """
+    from liquidity import detect_liquidity_voids
+    pd_score = 0
+    pd_direction = None
+    pd_level_type = None
+    pd_level_price = None
+    confluence_zones = []
+
+    max_dist = cfg.get("pd_zone_max_dist_atr", 1.0) * atr_val
+
+    for mb in mitigation.get("bullish", []):
+        if not mb.get("mitigated", False) and mb["touches"] <= cfg.get("mitigation_max_touches", 5):
+            dist = abs(price - mb["mid"])
+            if dist <= max_dist:
+                confluence_zones.append({"type": "mitigation", "direction": "bullish",
+                                        "price": mb["mid"], "strength": 1.0, "dist": dist})
+
+    for mb in mitigation.get("bearish", []):
+        if not mb.get("mitigated", False) and mb["touches"] <= cfg.get("mitigation_max_touches", 5):
+            dist = abs(price - mb["mid"])
+            if dist <= max_dist:
+                confluence_zones.append({"type": "mitigation", "direction": "bearish",
+                                        "price": mb["mid"], "strength": 1.0, "dist": dist})
+
+    for bb in breaker.get("bullish", []):
+        if not bb.get("mitigated", False) and bb["touches"] <= cfg.get("breaker_max_touches", 5):
+            dist = abs(price - bb["mid"])
+            if dist <= max_dist:
+                confluence_zones.append({"type": "breaker", "direction": "bullish",
+                                        "price": bb["mid"], "strength": 0.9, "dist": dist})
+
+    for bb in breaker.get("bearish", []):
+        if not bb.get("mitigated", False) and bb["touches"] <= cfg.get("breaker_max_touches", 5):
+            dist = abs(price - bb["mid"])
+            if dist <= max_dist:
+                confluence_zones.append({"type": "breaker", "direction": "bearish",
+                                        "price": bb["mid"], "strength": 0.9, "dist": dist})
+
+    for fvg_item in fvg.get("bullish_fvgs", []):
+        if not fvg_item.get("mitigated", False):
+            dist = abs(price - fvg_item["mid"])
+            if dist <= max_dist:
+                str_mult = 1.0 if fvg_item.get("size_class") == "big" else 0.6
+                confluence_zones.append({"type": "fvg", "direction": "bullish",
+                                        "price": fvg_item["mid"], "strength": str_mult, "dist": dist})
+
+    for fvg_item in fvg.get("bearish_fvgs", []):
+        if not fvg_item.get("mitigated", False):
+            dist = abs(price - fvg_item["mid"])
+            if dist <= max_dist:
+                str_mult = 1.0 if fvg_item.get("size_class") == "big" else 0.6
+                confluence_zones.append({"type": "fvg", "direction": "bearish",
+                                        "price": fvg_item["mid"], "strength": str_mult, "dist": dist})
+
+    for ob in obs.get("bullish", []):
+        if not ob.get("mitigated", False):
+            ob_mid = (ob["top"] + ob["bottom"]) / 2
+            dist = abs(price - ob_mid)
+            if dist <= max_dist:
+                confluence_zones.append({"type": "order_block", "direction": "bullish",
+                                        "price": ob_mid, "strength": 0.7, "dist": dist})
+
+    for ob in obs.get("bearish", []):
+        if not ob.get("mitigated", False):
+            ob_mid = (ob["top"] + ob["bottom"]) / 2
+            dist = abs(price - ob_mid)
+            if dist <= max_dist:
+                confluence_zones.append({"type": "order_block", "direction": "bearish",
+                                        "price": ob_mid, "strength": 0.7, "dist": dist})
+
+    for rb in rejection.get("bullish", []):
+        if not rb.get("mitigated", False) and rb["touches"] <= cfg.get("rejection_max_touches", 5):
+            dist = abs(price - rb["price"])
+            if dist <= max_dist:
+                confluence_zones.append({"type": "rejection", "direction": "bullish",
+                                        "price": rb["price"], "strength": 0.5, "dist": dist})
+
+    for rb in rejection.get("bearish", []):
+        if not rb.get("mitigated", False) and rb["touches"] <= cfg.get("rejection_max_touches", 5):
+            dist = abs(price - rb["price"])
+            if dist <= max_dist:
+                confluence_zones.append({"type": "rejection", "direction": "bearish",
+                                        "price": rb["price"], "strength": 0.5, "dist": dist})
+
+    if not confluence_zones:
+        return {"pd_score": 0, "pd_direction": None, "pd_level_type": None,
+                "pd_level_price": None, "confluence_zones": [], "confluence_count": 0}
+
+    priority = {"mitigation": 1, "breaker": 2, "fvg": 3, "order_block": 4, "rejection": 5}
+    confluence_zones.sort(key=lambda z: (priority.get(z["type"], 99), z["dist"]))
+
+    bull_zones = [z for z in confluence_zones if z["direction"] == "bullish"]
+    bear_zones = [z for z in confluence_zones if z["direction"] == "bearish"]
+
+    bull_score = sum(z["strength"] for z in bull_zones)
+    bear_score = sum(z["strength"] for z in bear_zones)
+
+    primary = confluence_zones[0]
+    pd_direction = primary["direction"]
+    pd_level_type = primary["type"]
+    pd_level_price = primary["price"]
+
+    if bull_score > bear_score:
+        pd_score = int(round(bull_score * 2))
+        pd_direction = "bullish"
+    elif bear_score > bull_score:
+        pd_score = int(round(bear_score * 2))
+        pd_direction = "bearish"
+    else:
+        pd_score = 0
+        pd_direction = None
+
+    return {
+        "pd_score": pd_score,
+        "pd_direction": pd_direction,
+        "pd_level_type": pd_level_type,
+        "pd_level_price": pd_level_price,
+        "confluence_zones": confluence_zones,
+        "confluence_count": len(confluence_zones),
+        "bull_score": bull_score,
+        "bear_score": bear_score,
+    }
+
+
 def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None) -> dict:
     empty = {
         "signal": "NONE", "score": 0, "price": 0.0, "entry": 0.0,
@@ -432,6 +777,15 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
     pools = detect_liquidity_pools(df, cfg)
     fvg = detect_fvg(df, cfg)
     pd_info = compute_premium_discount(df, cfg)
+
+    mitigation = detect_mitigation_blocks(df, obs, cfg)
+    breaker = detect_breaker_blocks(df, obs, structure, cfg)
+    rejection = detect_rejection_blocks(df, structure, cfg)
+    volume_profile = detect_volume_profile(df, cfg)
+    retrace = _validate_retracement(df, cfg)
+    confluence = _detect_confluence_setups(fvg, obs, mitigation, breaker, price, atr_val, cfg)
+    choch_key = _choch_in_key_level(structure, zones, obs, price, atr_val)
+    pd_priority = _pd_array_priority_scoring(price, atr_val, cfg, mitigation, breaker, fvg, obs, rejection, zones, sweep, structure)
 
     rsi_val = rsi(close, cfg["rsi_period"]).iloc[-1]
     macd_line, macd_sig, _ = macd(close, cfg["macd_fast"], cfg["macd_slow"], cfg["macd_signal"])
@@ -548,6 +902,8 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
                 ob_pts += 1
             if bullish_ob.get("high_volume", False):
                 ob_pts += 1
+            if bullish_ob.get("preceding_sweep", False):
+                ob_pts += 1
             buy_score += ob_pts
             buy_factors += 1
             tags = []
@@ -557,6 +913,8 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
                 tags.append("BOS")
             if bullish_ob.get("high_volume", False):
                 tags.append("vol")
+            if bullish_ob.get("preceding_sweep", False):
+                tags.append("sweep")
             speed = bullish_ob.get("speed", 0)
             if speed > 2.0:
                 tags.append("fast")
@@ -571,6 +929,8 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
                 ob_pts += 1
             if bearish_ob.get("high_volume", False):
                 ob_pts += 1
+            if bearish_ob.get("preceding_sweep", False):
+                ob_pts += 1
             sell_score += ob_pts
             sell_factors += 1
             tags = []
@@ -580,6 +940,8 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
                 tags.append("BOS")
             if bearish_ob.get("high_volume", False):
                 tags.append("vol")
+            if bearish_ob.get("preceding_sweep", False):
+                tags.append("sweep")
             speed = bearish_ob.get("speed", 0)
             if speed > 2.0:
                 tags.append("fast")
@@ -692,6 +1054,21 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
             sell_factors += 1
             details["fvg"] = f"bearish FVG {fvg['nearest']['bottom']:.2f}-{fvg['nearest']['top']:.2f}"
 
+    if volume_profile.get("poc") is not None:
+        details["volume_profile"] = f"POC {volume_profile['poc']:.2f} VA {volume_profile['va_low']:.2f}-{volume_profile['va_high']:.2f}"
+        if volume_profile.get("near_poc"):
+            details["vp_position"] = "at POC (magnet)"
+        elif volume_profile.get("in_premium"):
+            details["vp_position"] = "premium (above VA)"
+            if sell_score > 0:
+                sell_score += 1
+                sell_factors += 1
+        elif volume_profile.get("in_discount"):
+            details["vp_position"] = "discount (below VA)"
+            if buy_score > 0:
+                buy_score += 1
+                buy_factors += 1
+
     # --- Scalper-specific scoring ---
     if candle_pattern["pattern"]:
         cp = candle_pattern
@@ -737,11 +1114,241 @@ def analyze(df: pd.DataFrame, cfg: dict, bias: int = 0, live_price: float = None
                 sell_score += 1
                 sell_factors += 1
 
+    if pd_priority.get("pd_score", 0) > 0:
+        if pd_priority["pd_direction"] == "bullish":
+            buy_score += pd_priority["pd_score"]
+            buy_factors += 1
+            details["pd_array"] = f"bullish {pd_priority['pd_level_type']} @ {pd_priority['pd_level_price']:.2f} ({pd_priority['confluence_count']} zones)"
+        elif pd_priority["pd_direction"] == "bearish":
+            sell_score += pd_priority["pd_score"]
+            sell_factors += 1
+            details["pd_array"] = f"bearish {pd_priority['pd_level_type']} @ {pd_priority['pd_level_price']:.2f} ({pd_priority['confluence_count']} zones)"
+
+    bull_mit = find_nearest_mitigation(mitigation.get("bullish", []), price, atr_val, cfg)
+    bear_mit = find_nearest_mitigation(mitigation.get("bearish", []), price, atr_val, cfg)
+
+    if bull_mit:
+        mit_pts = 3
+        if bull_mit.get("bos_confirmed", False):
+            mit_pts += 1
+        if bull_mit["touches"] == 0:
+            mit_pts += 1
+        buy_score += mit_pts
+        buy_factors += 1
+        tags = ["mitigation"]
+        if bull_mit.get("bos_confirmed", False):
+            tags.append("BOS")
+        details["mitigation_block"] = f"bullish {bull_mit['bottom']:.2f}-{bull_mit['top']:.2f} ({', '.join(tags)})"
+
+    if bear_mit:
+        mit_pts = 3
+        if bear_mit.get("bos_confirmed", False):
+            mit_pts += 1
+        if bear_mit["touches"] == 0:
+            mit_pts += 1
+        sell_score += mit_pts
+        sell_factors += 1
+        tags = ["mitigation"]
+        if bear_mit.get("bos_confirmed", False):
+            tags.append("BOS")
+        details["mitigation_block"] = f"bearish {bear_mit['bottom']:.2f}-{bear_mit['top']:.2f} ({', '.join(tags)})"
+
+    bull_brk = find_nearest_breaker(breaker.get("bullish", []), price, atr_val, cfg)
+    bear_brk = find_nearest_breaker(breaker.get("bearish", []), price, atr_val, cfg)
+
+    if bull_brk:
+        brk_pts = 3
+        if bull_brk.get("bos_confirmed", False):
+            brk_pts += 1
+        if bull_brk.get("high_volume", False):
+            brk_pts += 1
+        buy_score += brk_pts
+        buy_factors += 1
+        tags = ["breaker"]
+        if bull_brk.get("bos_confirmed", False):
+            tags.append("BOS")
+        if bull_brk.get("high_volume", False):
+            tags.append("vol")
+        details["breaker_block"] = f"bullish {bull_brk['bottom']:.2f}-{bull_brk['top']:.2f} ({', '.join(tags)})"
+
+    if bear_brk:
+        brk_pts = 3
+        if bear_brk.get("bos_confirmed", False):
+            brk_pts += 1
+        if bear_brk.get("high_volume", False):
+            brk_pts += 1
+        sell_score += brk_pts
+        sell_factors += 1
+        tags = ["breaker"]
+        if bear_brk.get("bos_confirmed", False):
+            tags.append("BOS")
+        if bear_brk.get("high_volume", False):
+            tags.append("vol")
+        details["breaker_block"] = f"bearish {bear_brk['bottom']:.2f}-{bear_brk['top']:.2f} ({', '.join(tags)})"
+
+    bull_rej = find_nearest_rejection(rejection.get("bullish", []), price, atr_val, cfg)
+    bear_rej = find_nearest_rejection(rejection.get("bearish", []), price, atr_val, cfg)
+
+    if bull_rej:
+        rej_pts = 2
+        if bull_rej.get("high_volume", False):
+            rej_pts += 1
+        buy_score += rej_pts
+        buy_factors += 1
+        details["rejection_block"] = f"bullish wick @ {bull_rej['price']:.2f} (ratio {bull_rej['wick_ratio']:.2f})"
+
+    if bear_rej:
+        rej_pts = 2
+        if bear_rej.get("high_volume", False):
+            rej_pts += 1
+        sell_score += rej_pts
+        sell_factors += 1
+        details["rejection_block"] = f"bearish wick @ {bear_rej['price']:.2f} (ratio {bear_rej['wick_ratio']:.2f})"
+
+    if confluence.get("unicorn_count", 0) > 0:
+        unicorn = [s for s in confluence["setups"] if s["type"] == "unicorn"][0]
+        uni_pts = 4
+        if unicorn["direction"] == "bullish":
+            buy_score += uni_pts
+            buy_factors += 1
+            details["unicorn"] = f"bullish UNICORN @ {unicorn['price_level']:.2f}"
+        elif unicorn["direction"] == "bearish":
+            sell_score += uni_pts
+            sell_factors += 1
+            details["unicorn"] = f"bearish UNICORN @ {unicorn['price_level']:.2f}"
+
+    if confluence.get("bpr_count", 0) > 0:
+        bpr = [s for s in confluence["setups"] if s["type"] == "bpr"][0]
+        bpr_pts = 3
+        buy_score += bpr_pts
+        sell_score += bpr_pts
+        buy_factors += 1
+        sell_factors += 1
+        details["bpr"] = f"BPR equilibrium @ {bpr['price_level']:.2f}"
+
+    if confluence.get("ob_fvg_count", 0) > 0:
+        ob_fvg = [s for s in confluence["setups"] if s["type"] == "ob_fvg"][0]
+        obfvg_pts = 2
+        if ob_fvg["direction"] == "bullish":
+            buy_score += obfvg_pts
+            buy_factors += 1
+            details["ob_fvg"] = f"bullish OB+FVG @ {ob_fvg['price_level']:.2f}"
+        elif ob_fvg["direction"] == "bearish":
+            sell_score += obfvg_pts
+            sell_factors += 1
+            details["ob_fvg"] = f"bearish OB+FVG @ {ob_fvg['price_level']:.2f}"
+
+    if retrace.get("valid", False):
+        if retrace.get("bullish", False):
+            buy_score += 1
+            buy_factors += 1
+            details["retracement"] = f"valid bullish ({retrace['bull_closes']} consecutive closes)"
+        elif retrace.get("bearish", False):
+            sell_score += 1
+            sell_factors += 1
+            details["retracement"] = f"valid bearish ({retrace['bear_closes']} consecutive closes)"
+
+    if choch_key.get("inside_key_level", False):
+        choch_event = structure.get("event", "")
+        if "BULL" in choch_event:
+            buy_score += 3
+            buy_factors += 1
+            details["choch_key_level"] = f"CHoCH inside {choch_key['level_type']} @ {choch_key['level_price']:.2f}"
+        elif "BEAR" in choch_event:
+            sell_score += 3
+            sell_factors += 1
+            details["choch_key_level"] = f"CHoCH inside {choch_key['level_type']} @ {choch_key['level_price']:.2f}"
+
+    if bullish_ob and bullish_ob.get("has_imbalance", False):
+        buy_score += 1
+        buy_factors += 1
+        details["ob_imbalance"] = "bullish OB has imbalance"
+
+    if bearish_ob and bearish_ob.get("has_imbalance", False):
+        sell_score += 1
+        sell_factors += 1
+        details["ob_imbalance"] = "bearish OB has imbalance"
+
+    if fvg.get("nearest"):
+        fvg_size = fvg["nearest"].get("size_class", "medium")
+        if fvg_size == "big":
+            if fvg["nearest"]["direction"] == "bullish":
+                buy_score += 1
+                buy_factors += 1
+                details["fvg_size"] = "big FVG (enter at 50%)"
+            elif fvg["nearest"]["direction"] == "bearish":
+                sell_score += 1
+                sell_factors += 1
+                details["fvg_size"] = "big FVG (enter at 50%)"
+        elif fvg_size == "small":
+            details["fvg_size"] = "small FVG (enter at tip)"
+
+    # --- Session timing scoring (Power of 3, Judas, Silver Bullet, Displacement) ---
+    try:
+        ts_idx = df.index[-1]
+        if hasattr(ts_idx, 'tzinfo') and ts_idx.tzinfo is not None:
+            from datetime import timezone as _tz2
+            now_utc = ts_idx.astimezone(_tz2.utc).replace(tzinfo=None)
+        else:
+            now_utc = ts_idx.to_pydatetime()
+    except Exception:
+        now_utc = None
+
+    if now_utc is not None:
+        try:
+            st_result = session_timing_score(df, now_utc, cfg)
+            if st_result.get("total_score", 0) > 0:
+                st_score = st_result["total_score"]
+                details["session_timing"] = "; ".join(st_result.get("details", []))
+                details["session_phase"] = st_result.get("phase", "unknown")
+                details["killzone"] = st_result.get("killzone_label", "off-session")
+                if st_result.get("asian_range"):
+                    ar = st_result["asian_range"]
+                    details["asian_range"] = f"{ar['low']:.2f}-{ar['high']:.2f}"
+                if st_result.get("judas_swing", {}).get("detected"):
+                    details["judas_swing"] = st_result["judas_swing"].get("type", "detected")
+                if st_result.get("silver_bullet", {}).get("setup_ready"):
+                    details["silver_bullet"] = "setup ready"
+                # Add to dominant direction
+                dist_dir = st_result.get("distribution_direction", 0)
+                if dist_dir > 0:
+                    buy_score += st_score
+                    buy_factors += 1
+                elif dist_dir < 0:
+                    sell_score += st_score
+                    sell_factors += 1
+                elif st_result.get("judas_swing", {}).get("detected"):
+                    jd = st_result["judas_swing"]
+                    if jd["direction"] > 0:
+                        buy_score += st_score
+                        buy_factors += 1
+                    elif jd["direction"] < 0:
+                        sell_score += st_score
+                        sell_factors += 1
+                else:
+                    # Phase-only scoring: add to both (neutral)
+                    buy_score += max(0, st_score - 1)
+                    sell_score += max(0, st_score - 1)
+
+            # Displacement validation for OBs: penalize OBs without displacement
+            disp = st_result.get("displacement", {}) if st_result else {}
+            if disp.get("quality", 0) >= 3:
+                details["displacement_quality"] = f"{disp['quality']}/5"
+                # Boost direction of displacement
+                if disp["direction"] > 0:
+                    buy_score += 1
+                    buy_factors += 1
+                elif disp["direction"] < 0:
+                    sell_score += 1
+                    sell_factors += 1
+        except Exception as ste:
+            pass
+
     details["rsi"] = round(float(rsi_val), 2)
 
-    threshold = cfg.get("signal_threshold", 2)
-    strong = cfg.get("strong_threshold", 4)
-    min_factors = cfg.get("min_confluence_factors", 2)
+    threshold = cfg.get("signal_threshold", 4)
+    strong = cfg.get("strong_threshold", 7)
+    min_factors = cfg.get("min_confluence_factors", 3)
     sl_buffer = cfg.get("sl_atr_buffer", 1.0)
     rr = cfg.get("risk_reward", 2.0)
 

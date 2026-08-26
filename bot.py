@@ -23,7 +23,30 @@ from strategy import _atr, analyze, compute_bias, trading_allowed
 
 FIRM_SIGNALS = ("STRONG_BUY", "BUY", "STRONG_SELL", "SELL")
 
+_realtime_price_cache = {"price": None, "timestamp": None, "lock": threading.Lock()}
+
 _RANGE_RE = re.compile(r"(demand|supply|OB|FVG)\s+(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)")
+
+
+def _get_realtime_price():
+    """Get real-time XAUUSD price from cache or fetch."""
+    with _realtime_price_cache["lock"]:
+        if _realtime_price_cache["price"] and _realtime_price_cache["timestamp"]:
+            age = (datetime.now(timezone.utc) - _realtime_price_cache["timestamp"]).total_seconds()
+            if age < 5:
+                return _realtime_price_cache["price"]
+    
+    try:
+        live_price, ts, source = fetch_gold_spot_price()
+        if live_price and live_price > 1000:
+            with _realtime_price_cache["lock"]:
+                _realtime_price_cache["price"] = live_price
+                _realtime_price_cache["timestamp"] = datetime.now(timezone.utc)
+            return live_price
+    except Exception as e:
+        print(f"[realtime] Price fetch failed: {e}", file=sys.stderr)
+    
+    return None
 
 
 def _parse_range(text):
@@ -355,7 +378,7 @@ def analyze_pair(pair: str, cfg: dict) -> tuple[dict, pd.DataFrame]:
         except Exception:
             bias = 0
 
-    fresh, age_msg = validate_data_freshness(df, cfg.get("max_data_age_minutes", 20))
+    fresh, age_msg = validate_data_freshness(df, cfg.get("max_data_age_minutes", 10))
     if not fresh:
         print(f"  [{pair}] WARNING: {age_msg}")
 
@@ -364,6 +387,11 @@ def analyze_pair(pair: str, cfg: dict) -> tuple[dict, pd.DataFrame]:
     if live_price:
         result["live_price"] = live_price
         result["live_source"] = source
+    
+    realtime_price = _get_realtime_price()
+    if realtime_price:
+        result["realtime_price"] = realtime_price
+    
     return result, df
 
 
@@ -437,7 +465,8 @@ def _polling_loop(cfg):
     print(f"Starting SMC Gold Signal Bot. Pairs: {', '.join(cfg['pairs'])}")
     print(f"Entry: {cfg['timeframe']} | Bias: {cfg.get('bias_timeframe', 'none')}")
     print(f"Check every {cfg['interval_seconds']}s | Hourly digest: {cfg.get('hourly_digest', False)}")
-    print("Model: 4H/1H/15M decide direction -> 5M gives the entry trigger")
+    print(f"Real-time price: {cfg.get('realtime_price_check', False)} | Price interval: {cfg.get('realtime_price_interval', 5)}s")
+    print("Model: 4H/1H/45M/30M/15M decide direction -> 5M gives the entry trigger")
     print("Telegram alerts fire only on confirmed entries. Standby info stays in this console.\n")
 
     last_signals: dict[str, str] = {}
@@ -780,6 +809,24 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
                     print(f"[{pair}] chart error: {ce}", file=sys.stderr)
 
 
+def _realtime_price_stream(cfg):
+    """Background thread for real-time price updates."""
+    interval = cfg.get("realtime_price_interval", 5)
+    print(f"[realtime] Price stream started (every {interval}s)")
+    
+    while True:
+        try:
+            live_price, ts, source = fetch_gold_spot_price()
+            if live_price and live_price > 1000:
+                with _realtime_price_cache["lock"]:
+                    _realtime_price_cache["price"] = live_price
+                    _realtime_price_cache["timestamp"] = datetime.now(timezone.utc)
+        except Exception as e:
+            print(f"[realtime] Price stream error: {e}", file=sys.stderr)
+        
+        time.sleep(interval)
+
+
 def main() -> None:
     cfg = load_config()
 
@@ -791,9 +838,16 @@ def main() -> None:
         poll_thread = threading.Thread(target=_polling_loop, args=(cfg,), daemon=True)
         poll_thread.start()
         print(f"Polling loop started in background")
+        
+        if cfg.get("realtime_price_check", False):
+            price_thread = threading.Thread(target=_realtime_price_stream, args=(cfg,), daemon=True)
+            price_thread.start()
+            print(f"Real-time price stream started")
+        
         print(f"Webhook server starting on {host}:{port}")
         print(f"  TradingView alert URL: http://YOUR_WEBHOOK_URL/webhook")
         print(f"  Health check: http://YOUR_WEBHOOK_URL/health")
+        print(f"  Real-time price: http://YOUR_WEBHOOK_URL/price")
         from webhook_server import run_server
         run_server(host, port)
     else:
