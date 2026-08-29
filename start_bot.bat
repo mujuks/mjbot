@@ -1,6 +1,7 @@
 @echo off
 title MJBot - Gold Signal Bot
 cd /d "C:\Users\Kiongozi Legit\Downloads\websites\mjbot"
+chcp 65001 >nul 2>&1
 
 :restart
 echo [%date% %time%] Starting bot...

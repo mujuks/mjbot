@@ -176,6 +176,7 @@ async def _fetch_async(tv_symbol: str, interval_code: str, n_bars: int,
 
 def fetch_tv_history(symbol: str, interval: str = "5m", lookback_days: int = 30) -> pd.DataFrame:
     """Fetch OHLCV candles from TradingView; returns a UTC tz-aware frame."""
+    import time as _time
     iv = INTERVALS.get(interval)
     if iv is None:
         raise TvHistoryError(f"unsupported interval: {interval}")
@@ -185,16 +186,35 @@ def fetch_tv_history(symbol: str, interval: str = "5m", lookback_days: int = 30)
     bars_per_trading_day = max(1, int(1440 / iv_min * 5 / 7)) if iv != "D" else 1
     n_bars = int(lookback_days * bars_per_trading_day) + 60
 
-    df = asyncio.run(_fetch_async(tv_symbol, iv, n_bars))
-    cutoff = df.index[-1] - pd.Timedelta(days=lookback_days)
-    df = df[df.index >= cutoff]
+    last_err = None
+    for attempt in range(3):
+        try:
+            df = asyncio.run(_fetch_async(tv_symbol, iv, n_bars))
+            cutoff = df.index[-1] - pd.Timedelta(days=lookback_days)
+            df = df[df.index >= cutoff]
 
-    log.info(
-        "TradingView %s %s: %d bars (%s -> %s)",
-        tv_symbol, interval, len(df),
-        df.index[0].strftime("%m-%d %H:%M"), df.index[-1].strftime("%m-%d %H:%M"),
-    )
-    return df
+            log.info(
+                "TradingView %s %s: %d bars (%s -> %s)",
+                tv_symbol, interval, len(df),
+                df.index[0].strftime("%m-%d %H:%M"), df.index[-1].strftime("%m-%d %H:%M"),
+            )
+            return df
+        except TvHistoryError as e:
+            last_err = e
+            log.warning("TradingView attempt %d failed for %s %s: %s", attempt + 1, tv_symbol, interval, e)
+            if attempt < 2:
+                _time.sleep(2 ** attempt)
+        except (OSError, ConnectionError, ConnectionResetError) as e:
+            last_err = e
+            log.warning("TradingView attempt %d network error for %s %s: %s", attempt + 1, tv_symbol, interval, e)
+            if attempt < 2:
+                _time.sleep(2 ** attempt)
+        except Exception as e:
+            last_err = e
+            log.warning("TradingView attempt %d unexpected error for %s %s: %s", attempt + 1, tv_symbol, interval, e)
+            if attempt < 2:
+                _time.sleep(2 ** attempt)
+    raise TvHistoryError(f"all attempts failed for {tv_symbol} {interval}: {last_err}")
 
 
 if __name__ == "__main__":

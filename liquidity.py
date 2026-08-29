@@ -189,6 +189,52 @@ def compute_dynamic_tp(entry: float, sl: float, direction: str, pools: dict, atr
         return entry - 2.0 * risk
 
 
+def compute_multi_tp(entry: float, sl: float, direction: str, pools: dict, atr_val: float) -> tuple:
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return entry, entry
+
+    targets_key = "bsl_targets" if direction == "BUY" else "ssl_targets"
+    targets = pools.get(targets_key, [])
+
+    tp1_rr = 2.0
+    tp2_rr = 4.0
+
+    tp1 = None
+    tp2 = None
+
+    if direction == "BUY":
+        candidates = [t["price"] for t in targets if t["price"] > entry]
+        candidates.sort()
+        for p in candidates:
+            rr = (p - entry) / risk
+            if tp1 is None and rr >= tp1_rr:
+                tp1 = p
+            elif tp1 is not None and tp2 is None and rr >= tp2_rr:
+                tp2 = p
+                break
+        if tp1 is None:
+            tp1 = entry + tp1_rr * risk
+        if tp2 is None:
+            tp2 = entry + tp2_rr * risk
+    else:
+        candidates = [t["price"] for t in targets if t["price"] < entry]
+        candidates.sort(reverse=True)
+        for p in candidates:
+            rr = (entry - p) / risk
+            if tp1 is None and rr >= tp1_rr:
+                tp1 = p
+            elif tp1 is not None and tp2 is None and rr >= tp2_rr:
+                tp2 = p
+                break
+        if tp1 is None:
+            tp1 = entry - tp1_rr * risk
+        if tp2 is None:
+            tp2 = entry - tp2_rr * risk
+
+    return tp1, tp2
+
+
 def detect_fvg(df: pd.DataFrame, cfg: dict) -> dict:
     if df is None or df.empty or len(df) < 3:
         return {"bullish_fvgs": [], "bearish_fvgs": [], "nearest": None}

@@ -20,6 +20,9 @@ from mtf_engine import assess as mtf_assess
 from news_feed import blackout_check, daily_brief, next_event_line
 from quant import assess_signal, suggested_risk_pct
 from strategy import _atr, analyze, compute_bias, trading_allowed
+from brain import Brain
+import scanner
+from scalp_engine import scalp_entry_signal, format_scalp_alert
 
 FIRM_SIGNALS = ("STRONG_BUY", "BUY", "STRONG_SELL", "SELL")
 
@@ -157,14 +160,33 @@ def _format_watch_telegram(pair: str, result: dict, details: dict, signal: str) 
         dist_text = f"  Mid {mid:.2f} ({dist:+.1f} pts from price)"
 
     action = "BUY" if bull else "SELL"
-    emoji = "\U0001f441"  # eye emoji
     lines = [
-        f"{emoji} WATCH_{action} {pair}",
+        f">> WATCH_{action} {pair}",
         f"  Watching for {action} at {zone_line.split('(')[0].strip()}",
     ]
     if dist_text:
         lines.append(dist_text)
     lines.append(f"  Score: {buy_s}/{sell_s} | Price: {price:.2f}")
+    gated = details.get("gated_from")
+    if gated:
+        reason = []
+        if details.get("mtf_veto"):
+            reason.append("MTF mixed")
+        if details.get("scalp_15m_blocked"):
+            reason.append("15M misaligned")
+        if details.get("news_hold"):
+            reason.append(f"News: {details['news_hold']}")
+        if details.get("p_win") is not None and details.get("gated_from"):
+            reason.append(f"P(win)={details['p_win']:.0%}")
+        if reason:
+            lines.append(f"  Blocked by: {', '.join(reason)}")
+    htf = details.get("htf_direction", "")
+    if htf:
+        lines.append(f"  HTF Trend: {htf}")
+    mtf_sum = details.get("mtf_summary", "")
+    if mtf_sum:
+        lines.append(f"  MTF: {mtf_sum}")
+    lines.append(f"  Entry on {action} when gates clear")
     if len(plan) > 1:
         lines.append(f"  {plan[1]}")
     return "\n".join(lines)
@@ -220,6 +242,72 @@ def evaluate_entry_quality(result: dict, df, cfg: dict) -> dict | None:
         "invalid": (float(df["Low"].tail(20).min()) if bull
                     else float(df["High"].tail(20).max())),
     }
+
+
+def compute_entry_score(result: dict, details: dict, mtf: dict | None,
+                        brain_conf: float | None, df=None, cfg: dict = None) -> int:
+    """Rate a signal 1-10 based on multi-factor confluence quality."""
+    score = 0
+    buy_s = details.get("buy_score", 0)
+    sell_s = details.get("sell_score", 0)
+    max_score = max(buy_s, sell_s)
+    if max_score >= 8:
+        score += 3
+    elif max_score >= 6:
+        score += 2
+    elif max_score >= 4:
+        score += 1
+    confluence = details.get("confluence", 0)
+    if confluence >= 5:
+        score += 2
+    elif confluence >= 3:
+        score += 1
+    if mtf:
+        composite = abs(mtf.get("composite", 0))
+        if mtf.get("high_confluence"):
+            score += 2
+        elif composite >= 0.4:
+            score += 1
+    p_win = details.get("p_win")
+    if p_win is not None:
+        if p_win >= 0.60:
+            score += 1
+        elif p_win >= 0.50:
+            score += 0.5
+    if brain_conf is not None:
+        if brain_conf >= 0.65:
+            score += 1
+        elif brain_conf <= 0.40:
+            score -= 1
+    htf_dir = details.get("htf_direction", "")
+    signal_dir = "BUY" if "BUY" in result.get("signal", "") else "SELL"
+    if (signal_dir == "BUY" and htf_dir == "LONG") or (signal_dir == "SELL" and htf_dir == "SHORT"):
+        score += 1
+    for factor_key in ("unicorn", "breaker_block", "mitigation_block", "ob_fvg", "choch_key_level"):
+        if details.get(factor_key):
+            score += 1
+            break
+    if details.get("session_timing"):
+        sess = details["session_timing"]
+        if "PEAK" in sess or "prime" in sess.lower():
+            score += 1
+    if df is not None and len(df) >= 20 and cfg:
+        try:
+            atr_val = float(_atr(df, cfg.get("atr_period", 14)).iloc[-1])
+            price = float(result.get("price", 0))
+            bull = "BUY" in result.get("signal", "")
+            zone = _best_zone(details, bull, price)
+            if zone:
+                _, lo, hi = zone
+                ref = hi if bull else lo
+                dist = abs(price - ref) / atr_val if atr_val > 0 else 99
+                if dist < 0.3:
+                    score += 1
+                elif dist > 1.5:
+                    score -= 1
+        except Exception:
+            pass
+    return min(max(int(round(score)), 1), 10)
 
 
 def build_pending_plan(pair: str, result: dict, q: dict, cfg: dict, now_utc: datetime) -> dict:
@@ -413,7 +501,7 @@ def format_digest(pair: str, result: dict, now_utc: datetime, cfg: dict) -> str:
         lines.extend([
             f"  Entry: {result['entry']}",
             f"  Stop Loss: {result['stop_loss']}",
-            f"  Take Profit: {result['take_profit']}",
+            f"  TP1: {result.get('tp1', result['take_profit'])} | TP2: {result.get('tp2', result['take_profit'])}",
             f"  Score: {result['score']} | Buy: {details.get('buy_score', 0)} | Sell: {details.get('sell_score', 0)}",
         ])
     else:
@@ -452,6 +540,14 @@ def _htf_direction(mtf: dict | None) -> float:
     return round(sum(d * w for d, w in rows) / wsum, 3) if wsum else 0.0
 
 
+def _reset_daily_counters(cfg, now_utc, daily_date_ref, daily_signal_count, daily_firm_signals):
+    if daily_date_ref[0] != now_utc.date():
+        for pair in cfg.get("pairs", []):
+            daily_signal_count[pair] = 0
+            daily_firm_signals[pair] = []
+        daily_date_ref[0] = now_utc.date()
+
+
 def format_feed_down(pair: str, now_utc: datetime, cfg: dict) -> str:
     ts = now_utc.strftime("%Y-%m-%d %H:%M UTC")
     return (
@@ -478,11 +574,30 @@ def _polling_loop(cfg):
     last_brief_date_ref = [None]
     pending_plans: dict[str, dict] = {}
     tune_state: dict = {}
+    daily_signal_count: dict[str, int] = {}
+    daily_firm_signals: dict[str, list] = {}
+    daily_date_ref = [None]
+
+    daily_loss_state = {
+        "date": None,
+        "total_r": 0.0,
+        "consecutive_losses": 0,
+        "cooldown_until": None,
+        "trades_today": 0,
+    }
+
+    brain = Brain(cfg)
+    try:
+        brain.daily_reset()
+    except Exception:
+        pass
+    scanner_state = {"last_structure_scan": time.time()}
 
     try:
         journal.restore_open(journal.fetch_open_bot_trades(cfg))
         if journal._open:
-            print(f"[journal] tracking open bot trades: {list(journal._open.values())}")
+            count = journal.open_count()
+            print(f"[journal] tracking {count} open bot trades: {journal.open_trades_snapshot()}")
     except Exception as je:
         print(f"journal restore error: {je}", file=sys.stderr)
 
@@ -490,7 +605,9 @@ def _polling_loop(cfg):
         try:
             _poll_once(cfg, last_signals, last_results, last_dfs,
                        last_candle_ts, last_digest_hour_ref, feed_down,
-                       last_brief_date_ref, pending_plans, tune_state)
+                       last_brief_date_ref, pending_plans, tune_state, brain,
+                       scanner_state, daily_date_ref, daily_signal_count,
+                       daily_firm_signals, daily_loss_state)
         except KeyboardInterrupt:
             raise
         except Exception as e:
@@ -505,9 +622,55 @@ def _polling_loop(cfg):
 
 def _poll_once(cfg, last_signals, last_results, last_dfs,
                last_candle_ts, last_digest_hour_ref, feed_down,
-               last_brief_date_ref, pending_plans, tune_state):
+               last_brief_date_ref, pending_plans, tune_state, brain=None,
+               scanner_state=None, daily_date_ref=None, daily_signal_count=None,
+               daily_firm_signals=None, daily_loss_state=None):
+    if daily_date_ref is None:
+        daily_date_ref = [None]
+    if daily_signal_count is None:
+        daily_signal_count = {}
+    if daily_firm_signals is None:
+        daily_firm_signals = {}
     now_utc = datetime.now(timezone.utc)
     active = trading_allowed(now_utc, cfg)
+
+    # --- DAILY LOSS LIMIT CIRCUIT BREAKER ---
+    ll_cfg = cfg.get("daily_loss_limit", {})
+    trading_halted = False
+    if ll_cfg.get("enabled", True) and daily_loss_state is not None:
+        today = now_utc.date()
+        if daily_loss_state["date"] != today:
+            daily_loss_state["date"] = today
+            daily_loss_state["total_r"] = 0.0
+            daily_loss_state["consecutive_losses"] = 0
+            daily_loss_state["cooldown_until"] = None
+            daily_loss_state["trades_today"] = 0
+
+        if daily_loss_state["cooldown_until"] and now_utc < daily_loss_state["cooldown_until"]:
+            remaining = (daily_loss_state["cooldown_until"] - now_utc).total_seconds() / 60
+            if int(remaining) % 15 == 0:
+                print(f"[DAILY_LIMIT] Cooldown active - {remaining:.0f}m remaining")
+            trading_halted = True
+        elif daily_loss_state["total_r"] <= ll_cfg.get("max_daily_loss_r", -3):
+            cooldown_min = ll_cfg.get("cooldown_minutes", 60)
+            daily_loss_state["cooldown_until"] = now_utc.replace(
+                minute=now_utc.minute + cooldown_min, second=0, microsecond=0
+            )
+            msg = (f"[DAILY_LIMIT] Daily loss limit hit ({daily_loss_state['total_r']:.1f}R). "
+                   f"Trading halted for {cooldown_min}m.")
+            print(msg)
+            send_telegram(cfg, msg)
+            trading_halted = True
+        elif daily_loss_state["consecutive_losses"] >= ll_cfg.get("max_consecutive_losses", 3):
+            cooldown_min = ll_cfg.get("cooldown_minutes", 60)
+            daily_loss_state["cooldown_until"] = now_utc.replace(
+                minute=now_utc.minute + cooldown_min, second=0, microsecond=0
+            )
+            msg = (f"[DAILY_LIMIT] {daily_loss_state['consecutive_losses']} consecutive losses. "
+                   f"Trading halted for {cooldown_min}m.")
+            print(msg)
+            send_telegram(cfg, msg)
+            trading_halted = True
 
     if cfg.get("news", {}).get("daily_brief", True) and last_brief_date_ref[0] != now_utc.date():
         try:
@@ -520,6 +683,18 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
             send_telegram(cfg, brief)
         last_brief_date_ref[0] = now_utc.date()
 
+        if brain:
+            try:
+                for pair in cfg.get("pairs", []):
+                    brain_brief = brain.get_session_briefing(pair)
+                    print(brain_brief)
+                    send_telegram(cfg, brain_brief)
+                    pattern_rpt = brain.get_pattern_report()
+                    print(pattern_rpt)
+                    send_telegram(cfg, pattern_rpt)
+            except Exception as bbe:
+                print(f"brain brief error: {bbe}", file=sys.stderr)
+
     if now_utc.weekday() == 6 and 21 <= now_utc.hour < 23:
         try:
             tune_msg = autotune.maybe_run(cfg, tune_state)
@@ -530,11 +705,31 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
             print(tune_msg)
             send_telegram(cfg, tune_msg)
 
+    for pair in cfg.get("pairs", []):
+        try:
+            def _run_scan(p=pair):
+                try:
+                    report = scanner.run_periodic_scan(p, cfg, scanner_state)
+                    if report:
+                        print(report)
+                        send_telegram(cfg, report)
+                except Exception as sce:
+                    print(f"scanner error: {sce}", file=sys.stderr)
+            threading.Thread(target=_run_scan, daemon=True).start()
+        except Exception as sce:
+            print(f"scanner thread error: {sce}", file=sys.stderr)
+
     for pair in cfg["pairs"]:
         try:
             if not active:
                 if last_signals.get(pair) != "NONE":
                     print(f"[{pair}] Market closed - pausing signals")
+                    last_signals[pair] = "NONE"
+                continue
+
+            if trading_halted:
+                if last_signals.get(pair) != "NONE":
+                    print(f"[{pair}] Daily loss limit active - pausing signals")
                     last_signals[pair] = "NONE"
                 continue
 
@@ -633,6 +828,31 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
                 signal = "WATCH_BUY" if "BUY" in signal else "WATCH_SELL"
                 result["signal"] = signal
 
+            sd_cfg = cfg.get("signal_deficit", {})
+            if sd_cfg.get("enabled", True) and signal.startswith("WATCH"):
+                _reset_daily_counters(cfg, now_utc, daily_date_ref, daily_signal_count, daily_firm_signals)
+                firm_today = daily_firm_signals.get(pair, [])
+                max_per_day = sd_cfg.get("max_entries_per_day", 3)
+                min_per_day = sd_cfg.get("min_entries_per_day", 1)
+                deficit_hrs = sd_cfg.get("deficit_hours", 10)
+                threshold_boost = sd_cfg.get("deficit_threshold_boost", -1)
+                max_boost = sd_cfg.get("max_deficit_boost", -2)
+                hours_since_midnight = now_utc.hour + now_utc.minute / 60.0
+                in_deficit = len(firm_today) < min_per_day and hours_since_midnight >= deficit_hrs
+                under_max = len(firm_today) < max_per_day
+                if in_deficit and under_max:
+                    score = details.get("buy_score", 0) if "BUY" in signal else details.get("sell_score", 0)
+                    boosted_threshold = max(float(cfg.get("signal_threshold", 3)) + max_boost, 1)
+                    if score >= boosted_threshold:
+                        gated = details.get("gated_from")
+                        if gated and "BUY" in gated:
+                            signal = "BUY"
+                        elif gated and "SELL" in gated:
+                            signal = "SELL"
+                        result["signal"] = signal
+                        details["signal_deficit_promoted"] = True
+                        details["deficit_reason"] = f"{len(firm_today)}/{min_per_day} entries today, auto-promoted (score {score})"
+
             if signal.startswith("WATCH") and mtf:
                 htf_comp = _htf_direction(mtf)
                 htf_bullish = htf_comp > 0.20
@@ -689,9 +909,35 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
                     print(f"[{pair}] pending check error: {pe}", file=sys.stderr)
 
             try:
-                for jmsg in journal.check_exits(cfg, {pair: float(df["Close"].iloc[-1])}):
+                candle = df.iloc[-1]
+                jprices = {pair: {
+                    "close": float(candle["Close"]),
+                    "high": float(candle["High"]),
+                    "low": float(candle["Low"]),
+                }}
+                jmsgs, joutcomes = journal.check_exits(cfg, jprices)
+                for jmsg in jmsgs:
                     print(jmsg)
                     send_telegram(cfg, jmsg)
+                if brain and joutcomes:
+                    try:
+                        last_res = last_results.get(pair) or result
+                        last_det = last_res.get("details", {})
+                        for oc in joutcomes:
+                            brain.record_trade_outcome(
+                                pair, last_res, last_det,
+                                oc["outcome"], oc.get("pnl", 0), oc.get("r_multiple", 0),
+                            )
+                    except Exception as bce:
+                        print(f"[{pair}] brain outcome record error: {bce}", file=sys.stderr)
+                if daily_loss_state is not None and joutcomes:
+                    for oc in joutcomes:
+                        r_mult = oc.get("r_multiple", 0)
+                        daily_loss_state["total_r"] = daily_loss_state.get("total_r", 0) + r_mult
+                        if r_mult < 0:
+                            daily_loss_state["consecutive_losses"] = daily_loss_state.get("consecutive_losses", 0) + 1
+                        else:
+                            daily_loss_state["consecutive_losses"] = 0
             except Exception as je:
                 print(f"[{pair}] journal exit error: {je}", file=sys.stderr)
 
@@ -707,8 +953,8 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
                 htf_clear = abs(htf_comp) >= 0.30
                 htf_ok = (mtf is None) or (htf_clear and ((htf_comp > 0) == sig_up))
                 last_bar = df.iloc[-2] if len(df) > 1 else df.iloc[-1]
-                candle_ok = bool(last_bar["close"] > last_bar["open"]) if sig_up \
-                    else bool(last_bar["close"] < last_bar["open"])
+                candle_ok = bool(float(last_bar["Close"]) > float(last_bar["Open"])) if sig_up \
+                    else bool(float(last_bar["Close"]) < float(last_bar["Open"]))
 
                 details["htf_direction"] = (
                     "LONG" if htf_comp > 0.30 else "SHORT" if htf_comp < -0.30 else "RANGE"
@@ -758,6 +1004,44 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
                         last_signals[pair] = f"PENDING_{new_plan['side']}"
                 else:
                     pending_plans.pop(pair, None)
+                    brain_blocked = False
+                    if brain:
+                        try:
+                            conf = brain.compute_confidence(pair, result, details, mtf)
+                            details["brain_confidence"] = conf
+                            # ENFORCE: Skip bad sessions
+                            if brain.should_skip_session(pair, now_utc.hour):
+                                details["session_quality"] = "LOW-WR session (brain filtered)"
+                                brain_blocked = True
+                                print(f"[{pair}] BLOCKED by brain: bad session (hour {now_utc.hour})", file=sys.stderr)
+                            else:
+                                best = brain.best_sessions(pair)
+                                if best:
+                                    details["session_quality"] = f"Best: {', '.join(best)}"
+                            # ENFORCE: Block low confidence trades
+                            if conf is not None and conf < 0.40:
+                                brain_blocked = True
+                                print(f"[{pair}] BLOCKED by brain: low confidence ({conf:.2f})", file=sys.stderr)
+                            # ENFORCE: Block bad patterns
+                            from brain import _setup_fingerprint
+                            fingerprint = _setup_fingerprint(result, details)
+                            pattern_wr = brain.pattern_confidence(fingerprint)
+                            if pattern_wr is not None and pattern_wr < 0.40:
+                                brain_blocked = True
+                                print(f"[{pair}] BLOCKED by brain: bad pattern '{fingerprint}' (WR {pattern_wr:.0%})", file=sys.stderr)
+                            details["brain_blocked"] = brain_blocked
+                        except Exception as bce:
+                            print(f"[{pair}] brain error: {bce}", file=sys.stderr)
+                    if brain_blocked:
+                        last_signals[pair] = "BLOCKED"
+                        continue
+                    try:
+                        entry_score = compute_entry_score(result, details, mtf,
+                                                          details.get("brain_confidence"), df, cfg)
+                        details["entry_score"] = entry_score
+                    except Exception as es_err:
+                        entry_score = 5
+                        print(f"[{pair}] entry score error: {es_err}", file=sys.stderr)
                     if last_signals.get(pair) != signal:
                         message = format_alert(pair, result)
                         print(message)
@@ -771,6 +1055,14 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
                             journal.log_entry(cfg, pair, result)
                         except Exception as je:
                             print(f"[{pair}] journal error: {je}", file=sys.stderr)
+                        if daily_loss_state is not None:
+                            daily_loss_state["trades_today"] = daily_loss_state.get("trades_today", 0) + 1
+                        daily_signal_count[pair] = daily_signal_count.get(pair, 0) + 1
+                        daily_firm_signals.setdefault(pair, []).append({
+                            "ts": now_utc.isoformat(),
+                            "signal": signal,
+                            "price": result.get("price"),
+                        })
             else:
                 last_signals[pair] = signal if str(signal).startswith("WATCH") else "NONE"
                 dom = "BUY" if buy_score > sell_score else "SELL" if sell_score > buy_score else None
@@ -790,6 +1082,103 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
         except Exception as e:
             print(f"[{pair}] Error: {e}", file=sys.stderr)
 
+    try:
+        eod_msgs, eod_outcomes = journal.check_eod_close(cfg)
+        for msg in eod_msgs:
+            print(msg)
+            send_telegram(cfg, msg)
+        if brain and eod_outcomes:
+            for oc in eod_outcomes:
+                try:
+                    brain.record_trade_outcome(
+                        oc["pair"], {}, {},
+                        oc["outcome"], oc.get("pnl", 0), oc.get("r_multiple", 0),
+                    )
+                except Exception:
+                    pass
+        if daily_loss_state is not None and eod_outcomes:
+            for oc in eod_outcomes:
+                r_mult = oc.get("r_multiple", 0)
+                daily_loss_state["total_r"] = daily_loss_state.get("total_r", 0) + r_mult
+                if r_mult < 0:
+                    daily_loss_state["consecutive_losses"] = daily_loss_state.get("consecutive_losses", 0) + 1
+                else:
+                    daily_loss_state["consecutive_losses"] = 0
+    except Exception as e:
+        print(f"[journal] eod close error: {e}", file=sys.stderr)
+
+    try:
+        to_msgs, to_outcomes = journal.check_timeout(cfg)
+        for msg in to_msgs:
+            print(msg)
+            send_telegram(cfg, msg)
+        if brain and to_outcomes:
+            for oc in to_outcomes:
+                try:
+                    brain.record_trade_outcome(
+                        oc["pair"], {}, {},
+                        oc["outcome"], oc.get("pnl", 0), oc.get("r_multiple", 0),
+                    )
+                except Exception:
+                    pass
+        if daily_loss_state is not None and to_outcomes:
+            for oc in to_outcomes:
+                r_mult = oc.get("r_multiple", 0)
+                daily_loss_state["total_r"] = daily_loss_state.get("total_r", 0) + r_mult
+                if r_mult < 0:
+                    daily_loss_state["consecutive_losses"] = daily_loss_state.get("consecutive_losses", 0) + 1
+                else:
+                    daily_loss_state["consecutive_losses"] = 0
+    except Exception as e:
+        print(f"[journal] timeout close error: {e}", file=sys.stderr)
+
+    # --- SCALP ENGINE: Multi-TF intra-day range trading ---
+    if cfg.get("scalp_engine", {}).get("enabled", True) and active and not trading_halted:
+        for pair in cfg["pairs"]:
+            try:
+                scalp_5m = last_dfs.get(pair)
+                if scalp_5m is not None and len(scalp_5m) > 20:
+                    # Fetch additional timeframes for multi-TF scalp
+                    scalp_dfs = {"5m": scalp_5m}
+                    for tf in ["15m", "30m", "45m"]:
+                        try:
+                            tf_df = fetch_forex_data(pair, tf, cfg.get("lookback_days", 5))
+                            if tf_df is not None and len(tf_df) > 20:
+                                scalp_dfs[tf] = tf_df
+                        except Exception:
+                            pass
+
+                    scalp_sig = scalp_entry_signal(scalp_dfs, cfg, now_utc)
+                    if scalp_sig["signal"] != "NONE":
+                        last_sig = last_signals.get(f"scalp_{pair}", "NONE")
+                        if last_sig == "NONE":
+                            scalp_msg = format_scalp_alert(scalp_sig, pair)
+                            if scalp_msg:
+                                print(scalp_msg)
+                                send_telegram(cfg, scalp_msg)
+                                last_signals[f"scalp_{pair}"] = scalp_sig["signal"]
+                                try:
+                                    journal.log_entry(cfg, pair, {
+                                        "signal": scalp_sig["signal"],
+                                        "entry": scalp_sig["entry"],
+                                        "stop_loss": scalp_sig["sl"],
+                                        "take_profit": scalp_sig["tp1"],
+                                        "price": scalp_sig["entry"],
+                                        "details": {
+                                            "scalp": True,
+                                            "reason": scalp_sig["reason"],
+                                            "rr": scalp_sig["rr"],
+                                            "confirmations": scalp_sig.get("confirmations", 0),
+                                        },
+                                    })
+                                except Exception as sje:
+                                    print(f"[{pair}] scalp journal error: {sje}", file=sys.stderr)
+                    else:
+                        if f"scalp_{pair}" in last_signals:
+                            del last_signals[f"scalp_{pair}"]
+            except Exception as sce:
+                print(f"[{pair}] scalp engine error: {sce}", file=sys.stderr)
+
     if cfg.get("hourly_digest", False) and last_digest_hour_ref[0] != now_utc.hour:
         last_digest_hour_ref[0] = now_utc.hour
         for pair in cfg["pairs"]:
@@ -807,6 +1196,21 @@ def _poll_once(cfg, last_signals, last_results, last_dfs,
                         send_telegram_photo(cfg, chart, message)
                 except Exception as ce:
                     print(f"[{pair}] chart error: {ce}", file=sys.stderr)
+
+    # --- WEEKLY LEARNING SUMMARY (Friday 6 PM Kenya = 15:00 UTC) ---
+    if brain and now_utc.weekday() == 4 and now_utc.hour == 15 and now_utc.minute < 5:
+        last_learning_week = globals().get("_last_learning_week_ref", [None])
+        week_key = now_utc.isocalendar()[:2]
+        if last_learning_week[0] != week_key:
+            last_learning_week[0] = week_key
+            globals()["_last_learning_week_ref"] = last_learning_week
+            for pair in cfg["pairs"]:
+                try:
+                    summary = brain.get_weekly_learning_summary(pair)
+                    print(summary)
+                    send_telegram(cfg, summary)
+                except Exception as lse:
+                    print(f"[{pair}] weekly learning summary error: {lse}", file=sys.stderr)
 
 
 def _realtime_price_stream(cfg):
@@ -856,6 +1260,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     try:
+        import os as _os
+        _os.system("chcp 65001 >nul 2>&1")
         sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     except Exception:
@@ -864,6 +1270,19 @@ if __name__ == "__main__":
     _state = {"shutdown": False}
     def _handle_exit(signum, frame):
         _state["shutdown"] = True
+        print("\n[journal] Shutdown detected - closing all open trades...")
+        try:
+            from alerts import load_config
+            cfg_shutdown = load_config()
+            msgs, _ = journal.force_close_all(cfg_shutdown, reason="SHUTDOWN")
+            for m in msgs:
+                print(m)
+                try:
+                    send_telegram(cfg_shutdown, m)
+                except Exception:
+                    pass
+        except Exception as se:
+            print(f"[journal] shutdown close error: {se}", file=sys.stderr)
     _signal.signal(_signal.SIGINT, _handle_exit)
     _signal.signal(_signal.SIGTERM, _handle_exit)
     while not _state["shutdown"]:

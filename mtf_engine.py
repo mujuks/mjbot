@@ -30,7 +30,7 @@ TIMEFRAMES = [
 ]
 
 _ENTRY_TF = "5m"
-_VETO_LEVEL = -0.15
+_VETO_LEVEL = -0.25
 _STRONG_LEVEL = 0.55
 _SCALP_MIN_15M_ALIGN = 0.30  # 15m must agree at least this strongly for firm scalp signals
 

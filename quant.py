@@ -330,14 +330,19 @@ def gate_indices(wf: dict, threshold: float) -> np.ndarray:
     return wf["positions"][wf["probs"] >= threshold]
 
 
-def suggested_risk_pct(p_win: float, cfg: dict) -> float | None:
+def suggested_risk_pct(p_win: float, cfg: dict, brain_confidence: float | None = None) -> float | None:
     qcfg = cfg.get("quant", {})
     thr = float(qcfg.get("min_probability", 0.55))
     base = float(qcfg.get("base_risk_pct", 1.0))
     if p_win is None or p_win < thr:
         return None
     scale = 1.0 + (p_win - thr) / max(1.0 - thr, 1e-9)
-    return round(base * min(scale, 2.0), 2)
+    if brain_confidence is not None:
+        if brain_confidence >= 0.65:
+            scale *= 1.10
+        elif brain_confidence <= 0.45:
+            scale *= 0.80
+    return round(base * min(scale, 2.5), 2)
 
 
 def assess_signal(pair: str, df: pd.DataFrame, result: dict, cfg: dict) -> dict | None:

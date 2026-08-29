@@ -100,7 +100,8 @@ def format_alert(pair: str, result: dict) -> str:
         f"Time: {ts}",
         f"Entry: {result['entry']}",
         f"Stop Loss: {result['stop_loss']}",
-        f"Take Profit: {result['take_profit']}",
+        f"Take Profit 1: {result.get('tp1', result['take_profit'])}",
+        f"Take Profit 2: {result.get('tp2', result['take_profit'])}",
     ]
 
     if details.get("htf_direction"):
@@ -108,8 +109,9 @@ def format_alert(pair: str, result: dict) -> str:
 
     risk = abs(result["entry"] - result["stop_loss"])
     if risk > 0:
-        rr = abs(result["take_profit"] - result["entry"]) / risk
-        lines.append(f"Risk: {risk:.2f} pts | R:R 1:{rr:.1f}")
+        rr1 = abs(result.get("tp1", result["take_profit"]) - result["entry"]) / risk
+        rr2 = abs(result.get("tp2", result["take_profit"]) - result["entry"]) / risk
+        lines.append(f"Risk: {risk:.2f} pts | R:R 1:{rr1:.1f} / 1:{rr2:.1f}")
 
     if details.get("structure"):
         lines.append(f"Structure: {details['structure']}")
@@ -131,6 +133,8 @@ def format_alert(pair: str, result: dict) -> str:
         lines.append(f"Rejection: {details['rejection_block']}")
     if details.get("sweep"):
         lines.append(f"Sweep: {details['sweep']}")
+    if details.get("sweep_retest"):
+        lines.append(f"Sweep Retest: {details['sweep_retest']}")
     if details.get("order_block"):
         lines.append(f"OB: {details['order_block']}")
     if details.get("ob_imbalance"):
@@ -177,6 +181,14 @@ def format_alert(pair: str, result: dict) -> str:
         lines.append(f"Bias: {details['bias']}")
     if details.get("p_win") is not None:
         lines.append(f"Win Prob: {details['p_win'] * 100:.0f}%")
+    if details.get("brain_confidence") is not None:
+        conf = details["brain_confidence"]
+        tag = "HIGH" if conf >= 0.65 else "MEDIUM" if conf >= 0.50 else "LOW"
+        lines.append(f"Brain Confidence: {conf:.0%} [{tag}]")
+    if details.get("signal_deficit_promoted"):
+        lines.append(f"Signal Deficit: {details.get('deficit_reason', 'auto-promoted')}")
+    if details.get("session_quality"):
+        lines.append(f"Session: {details['session_quality']}")
     if details.get("risk_suggested"):
         lines.append(f"Suggested Risk: {details['risk_suggested']}")
     if details.get("mtf_high_confluence"):
@@ -191,6 +203,11 @@ def format_alert(pair: str, result: dict) -> str:
 
     buy_s = details.get("buy_score", 0)
     sell_s = details.get("sell_score", 0)
-    lines.append(f"Score: BUY {buy_s} | SELL {sell_s} | Confluence: {details.get('confluence', 0)} factors")
+    entry_score = details.get("entry_score")
+    score_line = f"Score: BUY {buy_s} | SELL {sell_s} | Confluence: {details.get('confluence', 0)} factors"
+    if entry_score is not None:
+        quality_tag = "A+" if entry_score >= 8 else "A" if entry_score >= 6 else "B" if entry_score >= 4 else "C"
+        score_line += f" | Quality: {entry_score}/10 [{quality_tag}]"
+    lines.append(score_line)
 
     return "\n".join(line for line in lines if line)

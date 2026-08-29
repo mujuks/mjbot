@@ -1,5 +1,7 @@
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -10,6 +12,46 @@ TV_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Content-Type": "application/json",
 }
+
+_price_cache = {
+    "data": None,
+    "timestamp": None,
+    "lock": threading.Lock(),
+}
+_last_warning_ts = 0.0
+_WARNING_COOLDOWN = 300
+
+
+def _cache_price(data: dict):
+    with _price_cache["lock"]:
+        _price_cache["data"] = data
+        _price_cache["timestamp"] = datetime.now(timezone.utc)
+
+
+def _get_cached_price(max_age_sec: float = 60.0):
+    with _price_cache["lock"]:
+        data = _price_cache["data"]
+        ts = _price_cache["timestamp"]
+        if data and ts:
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age < max_age_sec:
+                return data
+    return None
+
+
+def _retry_fetch(func, max_attempts: int = 3, base_delay: float = 1.0):
+    last_err = None
+    for attempt in range(max_attempts):
+        try:
+            result = func()
+            if result is not None:
+                return result
+        except Exception as e:
+            last_err = e
+            if attempt < max_attempts - 1:
+                delay = base_delay * (2 ** attempt)
+                time.sleep(delay)
+    return None
 
 
 def fetch_xauusd_from_tradingview():
@@ -34,7 +76,7 @@ def fetch_xauusd_from_tradingview():
         r.raise_for_status()
         data = r.json()
     except Exception as e:
-        log.warning("TradingView scan failed: %s", e)
+        log.debug("TradingView scan attempt failed: %s", e)
         return None
 
     if not data.get("data"):
@@ -146,25 +188,41 @@ def fetch_gold_ohlcv_from_tradingview():
                 "volume": float(d[7]) if len(d) > 7 and d[7] else 0,
             }
     except Exception as e:
-        log.warning("TradingView OHLCV fetch failed: %s", e)
+        log.debug("TradingView OHLCV fetch failed: %s", e)
     return None
 
 
 def get_live_price():
     data = fetch_xauusd_from_tradingview()
     if data:
+        _cache_price(data)
         return data["mid"], data["timestamp"], data["source"]
+    cached = _get_cached_price()
+    if cached:
+        return cached["mid"], cached["timestamp"], cached["source"] + " (cached)"
     return None, None, None
 
 
 def fetch_gold_spot_price():
-    try:
-        data = fetch_xauusd_from_tradingview()
-        if data and data["mid"] > 1000:
-            return data["mid"], data["timestamp"], data["source"]
-    except Exception as e:
-        log.warning("Live price fetch failed: %s", e)
-    log.warning("All live price sources failed")
+    global _last_warning_ts
+    data = fetch_xauusd_from_tradingview()
+    if data and data["mid"] > 1000:
+        _cache_price(data)
+        return data["mid"], data["timestamp"], data["source"]
+
+    cached = _get_cached_price(max_age_sec=120)
+    if cached and cached["mid"] > 1000:
+        return cached["mid"], cached["timestamp"], cached["source"] + " (cached)"
+
+    now = time.time()
+    if now - _last_warning_ts > _WARNING_COOLDOWN:
+        log.warning("All live price sources failed - using cache if available")
+        _last_warning_ts = now
+
+    with _price_cache["lock"]:
+        stale = _price_cache["data"]
+        if stale:
+            return stale["mid"], stale["timestamp"], stale["source"] + " (stale)"
     return None, None, None
 
 
